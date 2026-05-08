@@ -113,6 +113,36 @@ codex_nixos_add_runtime_library_dirs() {\
 \
 codex_nixos_add_runtime_library_dirs' "${installDir}/start.sh"
             fi
+            if ! grep -q "Browser Use bundled marketplace metadata" "${installDir}/start.sh"; then
+              ${pkgs.python3}/bin/python3 - "${installDir}/start.sh" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+needle = '    [ -f "$source_client" ] || return 0\n\n'
+insert = "\n".join([
+    "    # Browser Use bundled marketplace metadata for app-server plugin discovery.",
+    "    local source_marketplace=\"$SCRIPT_DIR/resources/plugins/openai-bundled/.agents/plugins/marketplace.json\"",
+    "    local marketplace_root=\"$codex_home/.tmp/bundled-marketplaces/openai-bundled\"",
+    "    local marketplace_plugins_dir=\"$marketplace_root/.agents/plugins\"",
+    "    if [ -f \"$source_marketplace\" ]; then",
+    "        mkdir -p \"$marketplace_plugins_dir\"",
+    "        rm -f \"$marketplace_plugins_dir/marketplace.json\"",
+    "        cp \"$source_marketplace\" \"$marketplace_plugins_dir/marketplace.json\" && \\",
+    "            chmod u+w \"$marketplace_plugins_dir/marketplace.json\" || \\",
+    "            echo \"Browser Use bundled marketplace sync failed; continuing with existing marketplace cache.\"",
+    "    fi",
+    "",
+    "",
+])
+if insert not in text:
+    if needle not in text:
+        raise SystemExit("Browser Use plugin cache insertion point not found")
+    text = text.replace(needle, needle + insert, 1)
+    path.write_text(text)
+PY
+            fi
           fi
 
           # Patch the Electron binary for NixOS.
