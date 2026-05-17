@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 
 const {
   COMPUTER_USE_UI_ENV_VAR,
@@ -30,6 +31,7 @@ const {
   applyLinuxQuitGuardPatch,
   applyLinuxHotkeyWindowPrewarmPatch,
   applyLinuxLaunchActionArgsPatch,
+  applyLinuxSettingsPersistencePatch,
   applyLinuxMenuPatch,
   applyLinuxMultiInstanceBootstrapPatch,
   applyLinuxAppSunsetPatch,
@@ -62,6 +64,7 @@ const {
 const {
   applyPersistentRateLimitFooterPatch,
 } = require("./patches/webview-assets.js");
+const { patchAssetFiles } = require("./patches/shared.js");
 
 const mainBundlePrefix =
   "let n=require(`electron`),i=require(`node:path`),o=require(`node:fs`);";
@@ -95,6 +98,29 @@ function captureWarns(fn) {
     console.warn = originalWarn;
   }
 }
+
+test("asset patch helpers match every file when passed a global regex", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-asset-global-"));
+  try {
+    const assetsDir = path.join(tempRoot, "webview", "assets");
+    fs.mkdirSync(assetsDir, { recursive: true });
+    fs.writeFileSync(path.join(assetsDir, "index-a.js"), "a", "utf8");
+    fs.writeFileSync(path.join(assetsDir, "index-b.js"), "b", "utf8");
+
+    const result = patchAssetFiles(
+      tempRoot,
+      /^index-.*\.js$/g,
+      (source) => source.toUpperCase(),
+      "missing index bundle",
+    );
+
+    assert.deepEqual(result, { matched: 2, changed: 2 });
+    assert.equal(fs.readFileSync(path.join(assetsDir, "index-a.js"), "utf8"), "A");
+    assert.equal(fs.readFileSync(path.join(assetsDir, "index-b.js"), "utf8"), "B");
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
 
 test("Linux target context parses distro, package, and desktop details", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-linux-target-"));
@@ -389,6 +415,35 @@ function currentLaunchActionBundleFixture() {
     "const e={gr:e=>({default:e,...e})};let n=require(`electron`);let i=require(`node:path`);i=e.gr(i);let o=require(`node:fs`);o=e.gr(o);let f=require(`node:net`);f=e.gr(f);",
     "async function CN(){let{setSecondInstanceArgsHandler:l}=t.y(),g={reportNonFatal(){}},k=new t.In;k.add(x);let j={globalState:{get(){return true}},repoRoot:`/tmp`,codexHome:`/tmp`},M={hotkeyWindowLifecycleManager:{hide(){},ensureHotkeyWindowController(){}},getPrimaryWindow(){},createFreshLocalWindow(){},ensureHostWindow(){},windowManager:{sendMessageToWindow(){}}},B=`local`,R={desktopNotificationManager:{dismissByNavigationPath(){}},getOrCreateContext(){},localHost:B},z={deepLinks:{queueProcessArgs(){},flushPendingDeepLinks(){}},navigateToRoute(){}};let A=Date.now(),w=()=>{},ae=e=>{e.isMinimized()&&e.restore(),e.show(),e.focus()},le=async()=>{try{M.hotkeyWindowLifecycleManager.hide();let e=M.getPrimaryWindow()??await M.createFreshLocalWindow(`/`);if(e==null)return;ae(e)}catch(e){g.reportNonFatal(e instanceof Error?e:`Failed to open window on second instance`,{kind:`second-instance-open-window-failed`})}};l(e=>{let n=t.t(t.g(e));if(z.deepLinks.queueProcessArgs(e)){n&&le();return}if(n){le();return}le()});let ue=async(e,t)=>{M.hotkeyWindowLifecycleManager.hide();let n=M.getPrimaryWindow(),r=n??await M.createFreshLocalWindow(e);r!=null&&(R.desktopNotificationManager.dismissByNavigationPath(e),n!=null&&t.navigateExistingWindow&&z.navigateToRoute(r,e),ae(r))};let ce=async()=>{};E&&ce();let be=await M.ensureHostWindow(B);be&&ae(be),w(`local window ensured`,A,{hostId:B,localWindowVisible:be?.isVisible()??!1}),A=Date.now(),await z.deepLinks.flushPendingDeepLinks();}",
   ].join("");
+}
+
+function settingsPersistenceBundleFixture() {
+  return [
+    "let i=require(`node:path`),o=require(`node:fs`);",
+    "var s=`.codex-global-state.json`;",
+    "const h={\"set-global-state\":async({key:a,value:b,origin:c})=>(this.globalState.set(a,b),Promise.resolve())};",
+  ].join("");
+}
+
+function legacySettingsPersistenceBundleFixture() {
+  return [
+    "let i=require(`node:path`),o=require(`node:fs`);",
+    "var s=`.codex-global-state.json`;function codexLinuxSettingsPath(){let e=process.env.XDG_CONFIG_HOME||process.env.HOME&&i.join(process.env.HOME,`.config`);return e?i.join(e,`codex-desktop`,`settings.json`):null}function codexLinuxReadSettingsFile(){let e=codexLinuxSettingsPath();if(!e||!o.existsSync(e))return{};try{let t=o.readFileSync(e,`utf8`),n=JSON.parse(t);return n&&typeof n===`object`&&!Array.isArray(n)?n:{}}catch(e){return{}}}function codexLinuxPersistSettingsState(e,t){if(process.platform!==`linux`||![`codex-linux-prompt-window-enabled`,`codex-linux-system-tray-enabled`,`codex-linux-warm-start-enabled`].includes(e))return;try{let n=codexLinuxSettingsPath();if(!n)return;let r=codexLinuxReadSettingsFile();t===void 0?delete r[e]:r[e]=t,o.mkdirSync(i.dirname(n),{recursive:!0,mode:448}),o.writeFileSync(n,JSON.stringify(r,null,2)+`\\n`,`utf8`)}catch(e){}}",
+    "const h={\"set-global-state\":async({key:a,value:b,origin:c})=>(this.globalState.set(a,b),codexLinuxPersistSettingsState(a,b),Promise.resolve())};",
+  ].join("");
+}
+
+function runSettingsPersistence(patchedSource, env, key, value) {
+  vm.runInNewContext(
+    `${patchedSource};codexLinuxPersistSettingsState(${JSON.stringify(key)},${JSON.stringify(value)});`,
+    {
+      console,
+      JSON,
+      Promise,
+      require,
+      process: { env, platform: "linux" },
+    },
+  );
 }
 
 function keybindsIndexBundleFixture() {
@@ -695,6 +750,18 @@ test("warns when a matched webview opaque bundle has no known insertion point", 
   ]);
 });
 
+test("does not treat unrelated Linux userAgent checks as opaque window patches", () => {
+  const { warnings } = captureWarns(() =>
+    applyLinuxOpaqueWindowsDefaultPatch(
+      "function unrelated(){return navigator.userAgent.includes(`Linux`)&&ready}function runtime(){let C=theme;if(C.opaqueWindows&&!ba()){}}",
+    ),
+  );
+
+  assert.deepEqual(warnings, [
+    "WARN: Could not find Linux opaque window default insertion point — skipping settings default patch",
+  ]);
+});
+
 test("adds Linux avatar overlay mouse passthrough recovery", () => {
   const patched = applyPatchTwice(
     applyLinuxAvatarOverlayMousePassthroughPatch,
@@ -923,6 +990,89 @@ test("recognizes bootstrap-owned single-instance handoff in current bundles", ()
   const patched = applyPatchTwice(applyLinuxSingleInstancePatch, source);
 
   assert.equal(patched, source);
+});
+
+test("persists Linux settings to the launcher-provided settings file", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-settings-path-"));
+  try {
+    const settingsFile = path.join(tempRoot, "config", "codex-cua-lab", "settings.json");
+    const patched = applyPatchTwice(applyLinuxSettingsPersistencePatch, settingsPersistenceBundleFixture());
+
+    assert.match(patched, /process\.env\.CODEX_LINUX_SETTINGS_FILE/);
+    runSettingsPersistence(
+      patched,
+      {
+        CODEX_LINUX_APP_ID: "codex-cua-lab",
+        CODEX_LINUX_SETTINGS_FILE: settingsFile,
+        HOME: path.join(tempRoot, "home"),
+      },
+      "codex-linux-warm-start-enabled",
+      false,
+    );
+
+    assert.equal(
+      JSON.parse(fs.readFileSync(settingsFile, "utf8"))["codex-linux-warm-start-enabled"],
+      false,
+    );
+    assert.equal(fs.existsSync(path.join(tempRoot, "home", ".config", "codex-desktop", "settings.json")), false);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("persists Linux settings under the effective side-by-side app id", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-settings-app-id-"));
+  try {
+    const xdgConfig = path.join(tempRoot, "xdg-config");
+    const patched = applyPatchTwice(applyLinuxSettingsPersistencePatch, settingsPersistenceBundleFixture());
+
+    assert.match(patched, /process\.env\.CODEX_LINUX_APP_ID\|\|process\.env\.CODEX_APP_ID/);
+    runSettingsPersistence(
+      patched,
+      {
+        CODEX_LINUX_APP_ID: "codex-cua-lab",
+        XDG_CONFIG_HOME: xdgConfig,
+      },
+      "codex-linux-system-tray-enabled",
+      false,
+    );
+
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(xdgConfig, "codex-cua-lab", "settings.json"), "utf8"))["codex-linux-system-tray-enabled"],
+      false,
+    );
+    assert.equal(fs.existsSync(path.join(xdgConfig, "codex-desktop", "settings.json")), false);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("migrates already-patched Linux settings persistence away from codex-desktop", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-settings-migrate-"));
+  try {
+    const xdgConfig = path.join(tempRoot, "xdg-config");
+    const patched = applyPatchTwice(applyLinuxSettingsPersistencePatch, legacySettingsPersistenceBundleFixture());
+
+    assert.match(patched, /process\.env\.CODEX_LINUX_SETTINGS_FILE/);
+    assert.doesNotMatch(patched, /join\(e,`codex-desktop`,`settings\.json`\)/);
+    runSettingsPersistence(
+      patched,
+      {
+        CODEX_LINUX_APP_ID: "codex-cua-lab",
+        XDG_CONFIG_HOME: xdgConfig,
+      },
+      "codex-linux-prompt-window-enabled",
+      false,
+    );
+
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(xdgConfig, "codex-cua-lab", "settings.json"), "utf8"))["codex-linux-prompt-window-enabled"],
+      false,
+    );
+    assert.equal(fs.existsSync(path.join(xdgConfig, "codex-desktop", "settings.json")), false);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test("adds Linux launch actions through current setSecondInstanceArgsHandler bundles", () => {
