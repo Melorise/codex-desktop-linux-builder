@@ -866,6 +866,25 @@ test("settings nav patches add a visible read aloud section after computer use",
   assert.match(patchedPage, /case`read-aloud-settings`:z=!1;break bb0;case`computer-use`/);
 });
 
+test("settings nav patch adds the read aloud icon to the current settings page icon map", () => {
+  const page = [
+    "var ge=f(),_e=e(r()),$=i(),ve=e=>(0,$.jsxs)(`svg`,{children:[]}),ye={\"general-settings\":q,profile:ee,\"keyboard-shortcuts\":ve,\"browser-use\":me,\"computer-use\":fe,\"local-environments\":pe,worktrees:K};",
+    "xe=[`browser-use`,`computer-use`,`data-controls`];",
+    "Se=[{slugs:[`browser-use`,`computer-use`,`local-environments`]}];",
+    "case`computer-use`:return A;",
+    "case`computer-use`:z=D.isLoading||h.isLoading;break bb0;",
+  ].join("");
+  const patched = twice(applySettingsPageNavPatch, page);
+  assert.match(patched, /codexLinuxReadAloudSettingsIcon=e=>\(0,\$\.jsxs\)/);
+  assert.doesNotMatch(patched, /codexLinuxReadAloudSettingsIcon=e=>\(0,Z\.jsxs\)/);
+  assert.match(
+    patched,
+    /"browser-use":me,"computer-use":fe,"read-aloud-settings":codexLinuxReadAloudSettingsIcon,"local-environments":pe/,
+  );
+  assert.match(patched, /`computer-use`,`read-aloud-settings`,`data-controls`/);
+  assert.match(patched, /case`read-aloud-settings`:z=!1;break bb0;case`computer-use`/);
+});
+
 test("app route patch wires read aloud settings to the generated page export", () => {
   const source =
     'var iD={"general-settings":(0,Q.lazy)(()=>Mr(()=>import(`./general-settings-B89XeV4U.js`).then(e=>({default:e.GeneralSettings})),__vite__mapDeps([1,2]),import.meta.url)),"keyboard-shortcuts":K};';
