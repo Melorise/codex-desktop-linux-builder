@@ -1,0 +1,68 @@
+# UI Tweaks
+
+`ui-tweaks` is an optional Linux feature for small Codex Desktop UI
+customizations. It is disabled by default and is intended as a shared place for
+future visual tweaks that are useful to some Linux users but should not affect
+the baseline app.
+
+Enable it in the local, gitignored feature config:
+
+```json
+{
+  "enabled": ["ui-tweaks"]
+}
+```
+
+## Tweaks
+
+| Tweak | Patch module | What it does | Settings |
+| --- | --- | --- | --- |
+| `sidebar.projectName` | `patches/sidebar-project-name.js` | Styles project names in the left sidebar project list. It does not style `Projects` / `Chats` section headings and does not style chat rows. | `tweaks.sidebar.projectName.enabled`, `tweaks.sidebar.projectName.style` |
+
+## Settings
+
+This feature keeps tweak settings in `feature.json` under the `tweaks` object.
+Each tweak documents its own config keys below.
+
+### `sidebar.projectName`
+
+Styles project names in the left sidebar project list.
+
+```json
+{
+  "tweaks": {
+    "sidebar": {
+      "projectName": {
+        "enabled": true,
+        "style": "font-weight: 700 !important;"
+      }
+    }
+  }
+}
+```
+
+Config keys:
+
+- `enabled`: `true` applies the tweak, `false` keeps the feature enabled but
+  skips this specific tweak.
+- `style`: CSS declaration string inserted into the project-name rule. The
+  default is `font-weight: 700 !important;`, so project names are bold only and
+  no color is forced.
+
+## Drift Behavior
+
+The patches are fail-soft. If upstream bundle markers drift, the feature writes
+a `WARN` message and leaves the asset unchanged. Invalid style values also warn
+and fall back to the default bold style. The feature should not block install,
+rebuild, or packaging flows.
+
+## Adding Tweaks
+
+Add each tweak as a focused module under `patches/`, register it from `patch.js`,
+document its JSON settings here, and add coverage in `test.js`.
+
+Run the feature tests with:
+
+```bash
+node --test linux-features/ui-tweaks/test.js
+```
