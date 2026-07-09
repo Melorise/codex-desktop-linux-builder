@@ -21,7 +21,7 @@ use tracing::{info, warn};
 const CLI_PACKAGE_NAME: &str = "@openai/codex";
 const STANDALONE_INSTALLER_URL: &str = "https://chatgpt.com/codex/install.sh";
 const CLI_NOT_INSTALLED_MESSAGE: &str =
-    "Codex CLI is required but not currently installed. Open the app to retry the automatic install flow, or install it manually with npm.";
+    "Codex CLI is required but not currently installed. Open the app to retry the automatic install flow, or install it manually with npm optional dependencies enabled.";
 const CLI_VERSION_CHECK_TTL: Duration = Duration::hours(1);
 #[cfg(test)]
 const CLI_INSTALLED_VERSION_TTL: Duration = Duration::hours(1);
@@ -896,6 +896,7 @@ fn install_latest_cli(latest_version: &str) -> Result<()> {
     let global_args = vec![
         OsString::from("install"),
         OsString::from("-g"),
+        OsString::from("--include=optional"),
         OsString::from(&package_spec),
     ];
 
@@ -918,6 +919,7 @@ fn install_latest_cli(latest_version: &str) -> Result<()> {
             let local_args = vec![
                 OsString::from("install"),
                 OsString::from("-g"),
+                OsString::from("--include=optional"),
                 OsString::from("--prefix"),
                 local_prefix.as_os_str().to_os_string(),
                 OsString::from(&package_spec),
@@ -2157,7 +2159,7 @@ exit 1
         let npm_path = bin_dir.join("npm");
         write_executable_script(
             &npm_path,
-            "#!/bin/sh\nif [ \"$1\" = \"view\" ] && [ \"$2\" = \"@openai/codex\" ] && [ \"$3\" = \"version\" ]; then\n  echo '0.42.1'\n  exit 0\nfi\nif [ \"$1\" = \"install\" ] && [ \"$2\" = \"-g\" ]; then\n  printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ] || [ \"$1\" = \"version\" ]; then' \"  echo 'codex-cli v0.42.1'\" '  exit 0' 'fi' 'exit 1' > \"$FAKE_CODEX_PATH\"\n  exit 0\nfi\nexit 1\n",
+            "#!/bin/sh\nif [ \"$1\" = \"view\" ] && [ \"$2\" = \"@openai/codex\" ] && [ \"$3\" = \"version\" ]; then\n  echo '0.42.1'\n  exit 0\nfi\nif [ \"$1\" = \"install\" ] && [ \"$2\" = \"-g\" ] && [ \"$3\" = \"--include=optional\" ]; then\n  printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ] || [ \"$1\" = \"version\" ]; then' \"  echo 'codex-cli v0.42.1'\" '  exit 0' 'fi' 'exit 1' > \"$FAKE_CODEX_PATH\"\n  exit 0\nfi\nexit 1\n",
         )?;
 
         let original_home = std::env::var_os("HOME");
@@ -2238,7 +2240,7 @@ if [ "$1" = "view" ] && [ "$2" = "@openai/codex" ] && [ "$3" = "version" ]; then
   echo '0.42.1'
   exit 0
 fi
-if [ "$1" = "install" ] && [ "$2" = "-g" ]; then
+if [ "$1" = "install" ] && [ "$2" = "-g" ] && [ "$3" = "--include=optional" ]; then
   exit 0
 fi
 exit 1
