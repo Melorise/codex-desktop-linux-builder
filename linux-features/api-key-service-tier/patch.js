@@ -13,6 +13,7 @@ const PATCHED_SERVICE_TIER_GATE = new RegExp(
     `${JS_IDENT}\\?\\.requirements\\?\\.featureRequirements\\?\\.fast_mode!==!1:` +
     `${JS_IDENT}===\`apikey\`\\)`,
 );
+const PATCHED_MODEL_MARKER = new RegExp(`${MODEL_MARKER}:${JS_IDENT}===\\\`apikey\\\``);
 const MODEL_LIST_MAPPING_SHAPE = new RegExp(
   `function ${JS_IDENT}\\(\\{authMethod:${JS_IDENT},availableModels:${JS_IDENT},` +
     `defaultModel:${JS_IDENT},enabledReasoningEfforts:${JS_IDENT},` +
@@ -55,7 +56,7 @@ function hasApiKeyServiceTierGateShape(source) {
 }
 
 function applyApiKeyModelMarkerPatch(source) {
-  if (new RegExp(`${MODEL_MARKER}:${JS_IDENT}===\\\`apikey\\\``).test(source)) {
+  if (PATCHED_MODEL_MARKER.test(source)) {
     return source;
   }
 
@@ -138,13 +139,29 @@ function applyApiKeyServiceTierPatch(source) {
 }
 
 function applyCurrentGateAndModelPatch(source) {
-  if (!PATCHED_SERVICE_TIER_GATE.test(source) && !hasApiKeyServiceTierGateShape(source)) {
+  const gateAlreadyPatched = PATCHED_SERVICE_TIER_GATE.test(source);
+  const modelAlreadyPatched = PATCHED_MODEL_MARKER.test(source);
+  const gateCandidate = gateAlreadyPatched ? source : applyApiKeyServiceTierGatePatch(source);
+  const modelCandidate = modelAlreadyPatched ? source : applyApiKeyModelMarkerPatch(source);
+  const gateReady = gateAlreadyPatched || gateCandidate !== source;
+  const modelReady = modelAlreadyPatched || modelCandidate !== source;
+
+  if (!gateReady && !hasApiKeyServiceTierGateShape(source)) {
     warn("Could not identify current service tier auth gate", "API key service tier gate patch");
   }
-  if (!source.includes(MODEL_MARKER) && !hasApiKeyModelListMappingShape(source)) {
+  if (!modelReady && !hasApiKeyModelListMappingShape(source)) {
     warn("Could not identify current model list mapping", "API key model service tier marker patch");
   }
-  return applyApiKeyModelMarkerPatch(applyApiKeyServiceTierGatePatch(source));
+  if (!gateReady || !modelReady) {
+    return source;
+  }
+  if (gateAlreadyPatched) {
+    return modelCandidate;
+  }
+  if (modelAlreadyPatched) {
+    return gateCandidate;
+  }
+  return applyApiKeyModelMarkerPatch(gateCandidate);
 }
 
 function applyCurrentFallbackFastTierPatch(source) {

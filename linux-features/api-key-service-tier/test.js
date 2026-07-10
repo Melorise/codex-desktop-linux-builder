@@ -166,6 +166,48 @@ test("partial current drift is reported when the other exact target still applie
   });
 });
 
+test("gate and model current contract fails closed when either side is missing", () => {
+  withFeatureConfig(["api-key-service-tier"], () => {
+    const tempApp = fs.mkdtempSync(path.join(os.tmpdir(), "api-key-service-tier-internal-partial-"));
+    try {
+      const assetsDir = path.join(tempApp, "webview", "assets");
+      const targetPath = path.join(
+        assetsDir,
+        "app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~k0ede4gb-partial.js",
+      );
+      const gateOnlySource =
+        "const diagnostic=`codexLinuxApiKeyServiceTierModel`;function sxe(e){let t=(0,cxe.c)(6),n=X(os),r=e?.hostId??n,i=Cf(r),a=i?.authMethod===`chatgpt`,o=i?.authMethod??null,s;t[0]!==r||t[1]!==o?(s={authMethod:o,hostId:r},t[0]=r,t[1]=o,t[2]=s):s=t[2];let{data:c,isPending:l}=ye(is,s),u=!!i?.isLoading||a&&l,d=a&&!u&&c!=null&&c?.requirements?.featureRequirements?.fast_mode!==!1,f;return t[3]!==u||t[4]!==d?(f={isServiceTierAllowed:d,isLoading:u},t[3]=u,t[4]=d,t[5]=f):f=t[5],f}";
+      fs.mkdirSync(assetsDir, { recursive: true });
+      fs.writeFileSync(targetPath, gateOnlySource);
+
+      const report = createPatchReport();
+      const warnings = captureWarnings(() => patchExtractedApp(tempApp, { report }));
+      const gateModel = report.patches.find(
+        (entry) => entry.name === "feature:api-key-service-tier:api-key-service-tier-gate-model",
+      );
+
+      assert.ok(warnings.some((warning) => warning.includes("current model list mapping")));
+      assert.equal(gateModel?.status, "skipped-optional");
+      assert.equal(fs.readFileSync(targetPath, "utf8"), gateOnlySource);
+
+      const modelOnlySource =
+        "function vbe({authMethod:e,availableModels:t,defaultModel:n,enabledReasoningEfforts:r,includeUltraReasoningEffort:i,models:a,useHiddenModels:o}){let s=[],c=null,l=o&&e!==`amazonBedrock`,u=a.some(e=>e.supportedReasoningEfforts.some(({reasoningEffort:e})=>e===`max`)),d=i&&a.some(e=>e.supportedReasoningEfforts.some(({reasoningEffort:e})=>e===`ultra`));return a.forEach(n=>{if(l?t.has(n.model):!n.hidden){let t=i?n.supportedReasoningEfforts:n.supportedReasoningEfforts.filter(({reasoningEffort:e})=>e!==`ultra`),a=(e===`copilot`?[t.find(e=>e.reasoningEffort===`medium`)??{reasoningEffort:`medium`,description:`medium effort`}]:t).filter(({reasoningEffort:e})=>Gx(e)&&r.has(e)),o={...n,supportedReasoningEfforts:a};s.push(o),n.isDefault&&(c=o)}}),c??=s.find(e=>e.model===n)??null,{models:s,defaultModel:c}}";
+      fs.writeFileSync(targetPath, modelOnlySource);
+      const modelOnlyReport = createPatchReport();
+      const modelOnlyWarnings = captureWarnings(() => patchExtractedApp(tempApp, { report: modelOnlyReport }));
+      const modelOnlyGateModel = modelOnlyReport.patches.find(
+        (entry) => entry.name === "feature:api-key-service-tier:api-key-service-tier-gate-model",
+      );
+
+      assert.ok(modelOnlyWarnings.some((warning) => warning.includes("current service tier auth gate")));
+      assert.equal(modelOnlyGateModel?.status, "skipped-optional");
+      assert.equal(fs.readFileSync(targetPath, "utf8"), modelOnlySource);
+    } finally {
+      fs.rmSync(tempApp, { recursive: true, force: true });
+    }
+  });
+});
+
 test("a missing exact current target gets its own skipped report entry", () => {
   withFeatureConfig(["api-key-service-tier"], () => {
     const tempApp = fs.mkdtempSync(path.join(os.tmpdir(), "api-key-service-tier-missing-target-"));
