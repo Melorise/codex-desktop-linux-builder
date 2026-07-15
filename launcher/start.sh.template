@@ -1459,8 +1459,9 @@ run_cli_preflight() {
         cli-preflight
         --print-path
     )
-    if [ -n "${CODEX_CLI_PATH:-}" ]; then
-        preflight_args+=(--cli-path "$CODEX_CLI_PATH")
+    local preflight_cli_path="${CODEX_CLI_SOURCE_PATH:-${CODEX_CLI_PATH:-}}"
+    if [ -n "$preflight_cli_path" ]; then
+        preflight_args+=(--cli-path "$preflight_cli_path")
     fi
     if [ "$allow_install_missing" = "1" ]; then
         preflight_args+=(--allow-install-missing)
@@ -1488,8 +1489,9 @@ run_cli_preflight_background() {
 
     (
         local -a args=(cli-preflight --print-path)
-        if [ -n "${CODEX_CLI_PATH:-}" ]; then
-            args+=(--cli-path "$CODEX_CLI_PATH")
+        local preflight_cli_path="${CODEX_CLI_SOURCE_PATH:-${CODEX_CLI_PATH:-}}"
+        if [ -n "$preflight_cli_path" ]; then
+            args+=(--cli-path "$preflight_cli_path")
         fi
         if ! run_update_manager "${args[@]}" >/dev/null 2>&1; then
             echo "Codex CLI background preflight failed. Continuing with the current CLI."
@@ -1497,32 +1499,23 @@ run_cli_preflight_background() {
     ) &
 }
 
-resolve_cli_launch_path() {
-    local selected_path="${CODEX_CLI_PATH:-}"
-    local resolved_path=""
+run_cli_launch_path_helper() {
+    python3 "$SCRIPT_DIR/.codex-linux/cli-launch-path.py" "$1"
+}
 
-    if [ -z "$selected_path" ]; then
+verify_cli_launch_path() {
+    local selected_path="${CODEX_CLI_PATH:-}"
+    local verified_path=""
+
+    [ -n "$selected_path" ] || return 1
+    if ! verified_path="$(run_cli_launch_path_helper "$selected_path")"; then
         return 1
     fi
+    [ -n "$verified_path" ] || return 1
 
-    case "$selected_path" in
-        */*) ;;
-        *)
-            selected_path="$(type -P "$selected_path" 2>/dev/null || true)"
-            [ -n "$selected_path" ] || return 1
-            ;;
-    esac
-
-    if command -v readlink >/dev/null 2>&1; then
-        resolved_path="$(readlink -f -- "$selected_path" 2>/dev/null || true)"
-    elif command -v realpath >/dev/null 2>&1; then
-        resolved_path="$(realpath -- "$selected_path" 2>/dev/null || true)"
-    fi
-    [ -n "$resolved_path" ] || return 1
-    [ -f "$resolved_path" ] && [ -x "$resolved_path" ] || return 1
-
-    CODEX_CLI_PATH="$resolved_path"
-    export CODEX_CLI_PATH
+    CODEX_CLI_SOURCE_PATH="$selected_path"
+    CODEX_CLI_PATH="$verified_path"
+    export CODEX_CLI_SOURCE_PATH CODEX_CLI_PATH
 }
 
 is_interactive_terminal() {
@@ -4199,11 +4192,11 @@ if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then
 fi
 
 if [ -n "$CODEX_CLI_PATH" ]; then
-    if ! resolve_cli_launch_path; then
-        notify_error "The selected Codex CLI path could not be resolved to an executable file. Reinstall Codex CLI or set CODEX_CLI_PATH to an executable codex binary."
+    if ! verify_cli_launch_path; then
+        notify_error "The selected Codex CLI failed its execution-free trust check and will not be executed. If it is a rejected managed standalone install, stop active Codex installers and remove its standalone tree. Updater-enabled native packages can then run: codex-update-manager recover-standalone-cli --print-path. With AppImage, Nix, or updaterless packages, reinstall from a verified package channel into a fresh path owned by you or root with no group/world-writable file or parent directory; do not reuse the rejected tree. To switch away from standalone intentionally, also remove ~/.codex-standalone-provenance."
         exit 1
     fi
-    log_phase "cli_launch_path_resolved"
+    log_phase "cli_launch_path_verified"
 fi
 
 if needs_cold_start; then

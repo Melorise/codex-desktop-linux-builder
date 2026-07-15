@@ -656,6 +656,7 @@ SCRIPT
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/node-runtime/bin/node"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/Cargo.toml"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/CHANGELOG.md"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/launcher/cli-launch-path.py"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/computer-use-linux/Cargo.toml"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/notification-actions-linux/Cargo.toml"
     assert_file_not_exists "$pkg_root/opt/codex-desktop/update-builder/global-dictation-linux/Cargo.toml"
@@ -668,6 +669,7 @@ SCRIPT
         >"$workspace/update-builder-patcher-help.txt"
     assert_contains "$workspace/update-builder-patcher-help.txt" "Usage: patch-linux-window-ui.js"
     assert_file_exists "$pkg_root/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh"
+    assert_file_exists "$pkg_root/opt/codex-desktop/.codex-linux/cli-launch-path.py"
     assert_contains "$pkg_root/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh" "is-enabled codex-update-manager.service"
     assert_not_contains "$pkg_root/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh" "enable --now codex-update-manager.service"
     assert_file_exists "$pkg_root/opt/codex-desktop/.codex-linux/codex-desktop-entry-doctor.sh"
@@ -1050,6 +1052,7 @@ SCRIPT
     assert_file_exists "$pkg_root/DEBIAN/postinst"
     assert_file_exists "$pkg_root/DEBIAN/prerm"
     assert_file_exists "$pkg_root/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh"
+    assert_file_exists "$pkg_root/opt/codex-desktop/.codex-linux/cli-launch-path.py"
     assert_file_exists "$pkg_root/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh"
     assert_file_not_exists "$pkg_root/usr/bin/codex-update-manager"
     assert_file_not_exists "$pkg_root/usr/lib/systemd/user/codex-update-manager.service"
@@ -1462,6 +1465,7 @@ SCRIPT
     assert_file_exists "$capture_dir/AppDir/usr/share/icons/hicolor/256x256/apps/codex-desktop.png"
     assert_file_exists "$capture_dir/AppDir/opt/codex-desktop/start.sh"
     assert_file_exists "$capture_dir/AppDir/opt/codex-desktop/.codex-linux/codex-desktop.png"
+    assert_file_exists "$capture_dir/AppDir/opt/codex-desktop/.codex-linux/cli-launch-path.py"
     assert_file_exists "$capture_dir/AppDir/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh"
     assert_file_exists "$capture_dir/AppDir/opt/codex-desktop/resources/node-runtime/bin/node"
     assert_file_exists "$capture_dir/AppDir/opt/codex-desktop/resources/codex-cli/preserve.txt"
@@ -4836,7 +4840,8 @@ test_packaged_runtime_keeps_managed_node_out_of_user_service_path() {
     local managed_node_bin="$workspace/managed-node/bin"
     local user_path="$fake_bin:/usr/bin"
     local fallback_path="$fake_bin:/fallback/bin"
-    local import_args="PATH DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS XAUTHORITY XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE YDOTOOL_SOCKET"
+    local homebrew_prefix="$workspace/homebrew"
+    local import_args="PATH HOMEBREW_PREFIX DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS XAUTHORITY XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE YDOTOOL_SOCKET"
     local -a captures
 
     mkdir -p "$fake_bin" "$runtime_dir" "$managed_node_bin"
@@ -4844,14 +4849,14 @@ test_packaged_runtime_keeps_managed_node_out_of_user_service_path() {
     cat >> "$fake_bin/systemctl" <<'EOF'
 case "$*" in
     "--user show-environment") exit 0 ;;
-    "--user import-environment "*) printf 'systemctl|%s|%s\n' "${PATH-}" "$*" >> "$CAPTURE_LOG"; exit 0 ;;
+    "--user import-environment "*) printf 'systemctl|%s|%s|%s\n' "${PATH-}" "${HOMEBREW_PREFIX-}" "$*" >> "$CAPTURE_LOG"; exit 0 ;;
     "--user is-enabled "*) exit 1 ;;
     *) exit 0 ;;
 esac
 EOF
     printf '%s\n' "#!$BASH_BIN" > "$fake_bin/dbus-update-activation-environment"
     cat >> "$fake_bin/dbus-update-activation-environment" <<'EOF'
-printf 'dbus|%s|%s\n' "${PATH-}" "$*" >> "$CAPTURE_LOG"
+printf 'dbus|%s|%s|%s\n' "${PATH-}" "${HOMEBREW_PREFIX-}" "$*" >> "$CAPTURE_LOG"
 EOF
     chmod +x "$fake_bin/systemctl" "$fake_bin/dbus-update-activation-environment"
 
@@ -4859,6 +4864,7 @@ EOF
         export CAPTURE_LOG="$capture_log"
         export XDG_RUNTIME_DIR="$runtime_dir"
         export CODEX_LINUX_USER_PATH="$user_path"
+        export HOMEBREW_PREFIX="$homebrew_prefix"
         export PATH="$managed_node_bin:$user_path"
         # shellcheck disable=SC1091
         source "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh"
@@ -4867,23 +4873,24 @@ EOF
         [ "$PATH" = "$managed_node_bin:$user_path" ] \
             || fail "Expected the packaged runtime to preserve the app PATH"
         mapfile -t captures < "$capture_log"
-        [ "${captures[0]:-}" = "systemctl|$user_path|--user import-environment $import_args" ] \
-            || fail "Expected systemd to import the user PATH"
-        [ "${captures[1]:-}" = "dbus|$user_path|--systemd $import_args" ] \
-            || fail "Expected D-Bus activation to import the user PATH"
+        [ "${captures[0]:-}" = "systemctl|$user_path|$homebrew_prefix|--user import-environment $import_args" ] \
+            || fail "Expected systemd to import the user PATH and HOMEBREW_PREFIX"
+        [ "${captures[1]:-}" = "dbus|$user_path|$homebrew_prefix|--systemd $import_args" ] \
+            || fail "Expected D-Bus activation to import the user PATH and HOMEBREW_PREFIX"
         [ "${#captures[@]}" -eq 2 ] \
             || fail "Expected one PATH export for systemd and D-Bus"
 
         : > "$capture_log"
         unset CODEX_LINUX_USER_PATH
+        unset HOMEBREW_PREFIX
         export PATH="$fallback_path"
         codex_packaged_runtime_prelaunch_background
         [ "$PATH" = "$fallback_path" ] \
             || fail "Expected the packaged runtime to preserve the fallback PATH"
         mapfile -t captures < "$capture_log"
-        [ "${captures[0]:-}" = "systemctl|$fallback_path|--user import-environment $import_args" ] \
+        [ "${captures[0]:-}" = "systemctl|$fallback_path||--user import-environment $import_args" ] \
             || fail "Expected systemd to import PATH when CODEX_LINUX_USER_PATH is unset"
-        [ "${captures[1]:-}" = "dbus|$fallback_path|--systemd $import_args" ] \
+        [ "${captures[1]:-}" = "dbus|$fallback_path||--systemd $import_args" ] \
             || fail "Expected D-Bus activation to import PATH when CODEX_LINUX_USER_PATH is unset"
         [ "${#captures[@]}" -eq 2 ] \
             || fail "Expected fallback PATH exports only for systemd and D-Bus"
@@ -4925,6 +4932,7 @@ test_launcher_rejects_missing_webview_entrypoint() {
     } > "$app_dir/start.sh"
     chmod +x "$app_dir/start.sh"
     cp "$REPO_DIR/launcher/webview-server.py" "$app_dir/.codex-linux/webview-server.py"
+    cp "$REPO_DIR/launcher/cli-launch-path.py" "$app_dir/.codex-linux/cli-launch-path.py"
     ln -s "$(command -v node)" "$app_dir/resources/node-runtime/bin/node"
 
     cat > "$app_dir/electron" <<'SCRIPT'
@@ -5209,9 +5217,11 @@ test_launcher_template_sanity() {
     assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" "CODEX_ELECTRON_CACHE_DIR"
     assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" "--continue-at -"
     assert_file_exists "$REPO_DIR/launcher/webview-server.py"
+    assert_file_exists "$REPO_DIR/launcher/cli-launch-path.py"
     assert_contains "$REPO_DIR/launcher/webview-server.py" "Cache-Control"
     assert_contains "$REPO_DIR/launcher/webview-server.py" "If-Modified-Since"
     assert_contains "$REPO_DIR/install.sh" "webview-server.py"
+    assert_contains "$REPO_DIR/install.sh" "cli-launch-path.py"
     assert_contains "$REPO_DIR/launcher/start.sh.template" 'python3 "$SCRIPT_DIR/.codex-linux/webview-server.py" "$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1'
     assert_contains "$REPO_DIR/launcher/start.sh.template" "WEBVIEW_PID_FILE"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "owned_webview_server_pid"
@@ -6117,6 +6127,7 @@ EOF
     assert_contains "$REPO_DIR/updater/src/app.rs" "kdialog"
     assert_contains "$REPO_DIR/updater/src/app.rs" "zenity"
     assert_contains "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "CHROME_DESKTOP"
+    assert_contains "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "HOMEBREW_PREFIX"
     assert_contains "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "is-enabled codex-update-manager.service"
     assert_contains "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "codex-update-manager-launch-check"
     assert_contains "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "codex-update-manager check-now --if-stale"
@@ -6351,14 +6362,16 @@ test_launcher_cli_resolution_policy() {
     python3 - "$REPO_DIR/launcher/start.sh.template" "$launcher_probe" "$routing_probe" <<'PY'
 import pathlib
 import re
+import shlex
 import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+helper_path = pathlib.Path(sys.argv[1]).with_name("cli-launch-path.py")
 functions = [source[
     source.index("codex_restore_original_ld_library_path() {"):
     source.index("# Capture before package-specific launcher patches")
 ]]
-for name in ("cached_codex_cli_path", "find_fnm_codex_cli", "find_codex_cli", "resolve_cli_launch_path", "pid_parent_matches", "codex_cli_version_probe", "codex_cli_version", "codex_cli_missing_optional_dependency", "log_codex_cli_path"):
+for name in ("cached_codex_cli_path", "find_fnm_codex_cli", "find_codex_cli", "verify_cli_launch_path", "pid_parent_matches", "codex_cli_version_probe", "codex_cli_version", "codex_cli_missing_optional_dependency", "log_codex_cli_path"):
     match = re.search(r"^" + re.escape(name) + r"\(\) \{[\s\S]*?^\}\n", source, re.M)
     if match is None:
         raise SystemExit(f"missing {name}")
@@ -6368,6 +6381,7 @@ pathlib.Path(sys.argv[2]).write_text(
     "#!/usr/bin/env bash\n"
     "set -Eeuo pipefail\n\n"
     + "\n".join(functions)
+    + f"\nrun_cli_launch_path_helper() {{ python3 {shlex.quote(str(helper_path))} \"$1\"; }}\n"
     + r'''
 case "${1:?}" in
     find)
@@ -6387,8 +6401,15 @@ case "${1:?}" in
     resolve)
         CODEX_CLI_PATH="${2:-}"
         export CODEX_CLI_PATH
-        resolve_cli_launch_path
+        verify_cli_launch_path
         printf '%s\n' "$CODEX_CLI_PATH"
+        ;;
+    resolve-source)
+        CODEX_CLI_PATH="${2:-}"
+        export CODEX_CLI_PATH
+        verify_cli_launch_path
+        printf 'path=%s\n' "$CODEX_CLI_PATH"
+        printf 'source=%s\n' "$CODEX_CLI_SOURCE_PATH"
         ;;
     *)
         exit 64
@@ -6401,22 +6422,31 @@ esac
 preflight_match = re.search(r"^run_cli_preflight\(\) \{[\s\S]*?^\}\n", source, re.M)
 if preflight_match is None:
     raise SystemExit("missing run_cli_preflight")
-resolve_match = re.search(r"^resolve_cli_launch_path\(\) \{[\s\S]*?^\}\n", source, re.M)
-if resolve_match is None:
-    raise SystemExit("missing resolve_cli_launch_path")
-routing_start = source.index('if [ -n "$CODEX_CLI_PATH" ]; then\n    if ! resolve_cli_launch_path')
+trust_match = re.search(r"^verify_cli_launch_path\(\) \{[\s\S]*?^\}\n", source, re.M)
+if trust_match is None:
+    raise SystemExit("missing verify_cli_launch_path")
+routing_start = source.index('if [ -n "$CODEX_CLI_PATH" ]; then\n    if ! verify_cli_launch_path')
 routing_end = source.index("\nexport_packaged_runtime_env", routing_start)
 final_version_log = source.index("\nlog_codex_cli_path\n", routing_end)
 electron_launch = source.index("\nlaunch_electron ", final_version_log)
 if not routing_start < routing_end < final_version_log < electron_launch:
-    raise SystemExit("CLI launch path resolution must precede the final version log and Electron launch")
+    raise SystemExit("CLI trust gate must precede the final version log and Electron launch")
 pathlib.Path(sys.argv[3]).write_text(
     "#!/usr/bin/env bash\n"
     "set -Eeuo pipefail\n\n"
     + r'''
 CODEX_CLI_PATH="${ROUTING_CLI_PATH:-/tmp/codex}"
 has_update_manager() { [ "${UPDATE_MANAGER_AVAILABLE:-0}" = "1" ]; }
+run_cli_launch_path_helper() {
+    printf 'trust=called\n' >> "$ROUTING_LOG"
+    if [ "${TRUST_RESULT:-success}" = "success" ]; then
+        printf '%s\n' /tmp/verified-codex
+        return 0
+    fi
+    return 1
+}
 run_update_manager() {
+    printf 'preflight_args=%s\n' "$*" >> "$ROUTING_LOG"
     if [ "${UPDATE_MANAGER_RESULT:-failure}" = "success" ]; then
         printf '%s\n' /tmp/repaired-codex
         return 0
@@ -6435,7 +6465,7 @@ log_codex_cli_path() { printf 'version=final\n' >> "$ROUTING_LOG"; }
 launch_electron() { printf 'electron=launch\n' >> "$ROUTING_LOG"; }
 '''
     + preflight_match.group(0)
-    + resolve_match.group(0)
+    + trust_match.group(0)
     + "\n"
     + source[routing_start:routing_end]
     + "\nlog_codex_cli_path\nlaunch_electron\n",
@@ -6450,6 +6480,7 @@ PY
     local clean_tool_path="/usr/bin:/bin"
     local selected_cli
     mkdir -p "$path_cli_bin" "$fake_home/.npm-global/bin"
+    chmod 0755 "$workspace" "$path_cli_bin" "$fake_home" "$fake_home/.npm-global" "$fake_home/.npm-global/bin"
 
     printf '#!/usr/bin/env bash\nprintf "codex-cli 0.120.0\\n"\n' > "$path_cli_bin/codex"
     printf '#!/usr/bin/env bash\nprintf "codex-cli 9.999.0\\n"\n' > "$fake_home/.npm-global/bin/codex"
@@ -6477,16 +6508,32 @@ PY
     mkdir -p "$resolve_bin"
     printf '#!/usr/bin/env bash\nprintf "codex-cli 0.170.0\\n"\n' > "$resolve_bin/codex"
     chmod 0775 "$resolve_bin" "$resolve_bin/codex"
-    resolved_cli="$(env -i PATH="$resolve_bin:$HOST_TOOL_PATH" HOME="$fake_home" "$launcher_probe" resolve codex)"
-    [ "$resolved_cli" = "$(realpath "$resolve_bin/codex")" ] || fail "CLI resolver must canonicalize group-writable PATH executables, got $resolved_cli"
+    if env -i PATH="$resolve_bin:$HOST_TOOL_PATH" HOME="$fake_home" "$launcher_probe" resolve codex >/dev/null 2>&1; then
+        fail "CLI trust helper must reject group-writable PATH executables"
+    fi
 
     local external_cli="$workspace/external-codex"
     local visible_cli="$workspace/visible-codex"
     printf '#!/usr/bin/env bash\nprintf "codex-cli 0.171.0\\n"\n' > "$external_cli"
-    chmod +x "$external_cli"
+    chmod 0755 "$external_cli"
     ln -s "$external_cli" "$visible_cli"
     resolved_cli="$(env -i PATH="$HOST_TOOL_PATH" HOME="$fake_home" "$launcher_probe" resolve "$visible_cli")"
     [ "$resolved_cli" = "$(realpath "$external_cli")" ] || fail "CLI resolver must canonicalize visible symlinks, got $resolved_cli"
+
+    local custom_brew_prefix="$workspace/custom-homebrew"
+    local custom_brew_target_dir="$workspace/custom-homebrew-cellar/openai-codex/0.42.0/bin"
+    local custom_brew_visible="$custom_brew_prefix/bin/codex"
+    local source_output
+    mkdir -p "$custom_brew_prefix/bin" "$custom_brew_target_dir"
+    printf '#!/usr/bin/env bash\nprintf "codex-cli 0.172.0\\n"\n' > "$custom_brew_target_dir/codex"
+    find "$custom_brew_prefix" "$workspace/custom-homebrew-cellar" -type d -exec chmod 0755 {} +
+    chmod 0755 "$custom_brew_target_dir/codex"
+    ln -s "$custom_brew_target_dir/codex" "$custom_brew_visible"
+    source_output="$(env -i PATH="$HOST_TOOL_PATH" HOME="$fake_home" HOMEBREW_PREFIX="$custom_brew_prefix" "$launcher_probe" resolve-source "$custom_brew_visible")"
+    grep -qx "path=$(realpath "$custom_brew_target_dir/codex")" <<<"$source_output" || \
+        fail "CLI trust helper must expose the canonical launch path for Homebrew: $source_output"
+    grep -qx "source=$custom_brew_visible" <<<"$source_output" || \
+        fail "CLI trust helper must preserve the visible Homebrew source path: $source_output"
 
     local override_cli="$workspace/override-codex"
     local log_output
@@ -6624,25 +6671,25 @@ PY
     chmod +x "$routing_cli"
     if env -i PATH="$HOST_TOOL_PATH" ROUTING_LOG="$routing_log" \
         ROUTING_CLI_PATH="$workspace/missing-routing-codex" \
-        UPDATE_MANAGER_AVAILABLE=0 BROKEN_CLI=1 \
+        UPDATE_MANAGER_AVAILABLE=0 TRUST_RESULT=failure BROKEN_CLI=1 \
         "$routing_probe"; then
-        fail "unresolvable CLI path must abort launcher startup"
+        fail "standalone trust failure must abort launcher startup"
     fi
-    grep -q '^notify=The selected Codex CLI path could not be resolved to an executable file' "$routing_log" || \
-        fail "unresolvable CLI path must show simple executable guidance"
+    grep -q '^notify=The selected Codex CLI failed its execution-free trust check' "$routing_log" || \
+        fail "standalone trust failure must show safe recovery guidance"
     if grep -qE '^(probe=|background=|version=|electron=)' "$routing_log"; then
-        fail "unresolvable CLI path must block every CLI probe, final version log, and Electron startup"
+        fail "standalone trust failure must block every CLI probe, final version log, and Electron startup"
     fi
 
     : > "$routing_log"
     if env -i PATH="$HOST_TOOL_PATH" ROUTING_LOG="$routing_log" \
         ROUTING_CLI_PATH="$workspace/missing-routing-codex" \
-        COLD_START=0 UPDATE_MANAGER_AVAILABLE=0 \
+        COLD_START=0 UPDATE_MANAGER_AVAILABLE=0 TRUST_RESULT=failure \
         "$routing_probe"; then
-        fail "unresolvable CLI path must also abort second-instance handoff"
+        fail "standalone trust failure must also abort second-instance handoff"
     fi
     if grep -qE '^(probe=|background=|version=|electron=)' "$routing_log"; then
-        fail "second-instance path resolution failure must not reach any CLI probe or Electron startup"
+        fail "second-instance trust failure must not reach any CLI probe or Electron startup"
     fi
 
     : > "$routing_log"
@@ -6672,6 +6719,17 @@ PY
         fail "sync preflight must remain fail-soft for a CLI that is not known broken"
 
     : > "$routing_log"
+    env -i PATH="$HOST_TOOL_PATH" ROUTING_LOG="$routing_log" \
+        ROUTING_CLI_PATH="$routing_cli" \
+        CODEX_SYNC_CLI_PREFLIGHT=1 BROKEN_CLI=0 UPDATE_MANAGER_AVAILABLE=1 \
+        UPDATE_MANAGER_RESULT=success "$routing_probe"
+    grep -qx "preflight_args=cli-preflight --print-path --cli-path $routing_cli" "$routing_log" || \
+        fail "updater preflight must receive the visible CLI source path for channel classification"
+    if grep -q -- '--cli-path /tmp/verified-codex' "$routing_log"; then
+        fail "updater preflight must not classify using only the canonical launch path"
+    fi
+
+    : > "$routing_log"
     if env -i PATH="$HOST_TOOL_PATH" ROUTING_LOG="$routing_log" \
         ROUTING_CLI_PATH="$routing_cli" \
         BROKEN_CLI=1 UPDATE_MANAGER_AVAILABLE=0 "$routing_probe"; then
@@ -6692,16 +6750,96 @@ PY
         ROUTING_CLI_PATH="$routing_cli" \
         BROKEN_CLI=0 UPDATE_MANAGER_AVAILABLE=1 \
         "$routing_probe"
-    grep -qx 'phase=cli_launch_path_resolved' "$routing_log" || \
-        fail "successful CLI path resolution must be recorded before normal preflight"
+    grep -qx 'trust=called' "$routing_log" || \
+        fail "native launcher must synchronously validate the selected CLI"
+    grep -qx 'phase=cli_launch_path_verified' "$routing_log" || \
+        fail "successful trust validation must be recorded before normal preflight"
     grep -qx 'probe=missing-optional' "$routing_log" || \
-        fail "healthy CLI must be probed only after path resolution succeeds"
+        fail "healthy CLI must be probed only after trust validation succeeds"
     grep -qx 'version=final' "$routing_log" || \
-        fail "successful CLI path resolution must allow the final CLI version log"
+        fail "successful trust validation must allow the final CLI version log"
     grep -qx 'electron=launch' "$routing_log" || \
-        fail "successful CLI path resolution must allow Electron startup"
-    [ "$(sed -n '/^phase=cli_launch_path_resolved$/=' "$routing_log")" -lt "$(sed -n '/^probe=missing-optional$/=' "$routing_log")" ] || \
-        fail "CLI path resolution must precede every CLI version probe"
+        fail "successful trust validation must allow Electron startup"
+    [ "$(sed -n '/^trust=called$/=' "$routing_log")" -lt "$(sed -n '/^probe=missing-optional$/=' "$routing_log")" ] || \
+        fail "trust validation must precede every CLI version probe"
+
+    local trust_workspace="$workspace/standalone-trust"
+    local codex_home="$trust_workspace/home/.codex"
+    local release="$codex_home/packages/standalone/releases/0.42.0-test-target"
+    local visible_cli="$trust_workspace/home/.local/bin/codex"
+    local stable_path
+    mkdir -p "$release/bin" "$(dirname "$visible_cli")"
+    chmod go-w "$workspace"
+    find "$trust_workspace" -type d -exec chmod go-w {} +
+    cat > "$release/bin/codex" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '%s\n' 'codex-cli 0.42.0'
+SCRIPT
+    chmod 0755 "$release/bin/codex"
+    ln -s "$release" "$codex_home/packages/standalone/current"
+    ln -s "$codex_home/packages/standalone/current/bin/codex" "$visible_cli"
+
+    stable_path="$(HOME="$trust_workspace/home" python3 "$REPO_DIR/launcher/cli-launch-path.py" "$visible_cli")"
+    [ "$stable_path" = "$(realpath "$release/bin/codex")" ] || \
+        fail "launcher trust helper must return the canonical standalone release target"
+
+    local replacement_marker="$trust_workspace/replacement-executed"
+    local replacement_cli="$trust_workspace/replacement-codex"
+    cat > "$replacement_cli" <<SCRIPT
+#!/usr/bin/env bash
+: > "$replacement_marker"
+printf '%s\n' 'codex-cli 9.9.9'
+SCRIPT
+    chmod 0755 "$replacement_cli"
+    rm "$visible_cli"
+    ln -s "$replacement_cli" "$visible_cli"
+
+    chmod 0775 "$(dirname "$visible_cli")"
+    mv "$codex_home/packages/standalone" "$codex_home/packages/standalone-rejected"
+    if HOME="$trust_workspace/home" CODEX_HOME="$codex_home" \
+        python3 "$REPO_DIR/launcher/cli-launch-path.py" "$visible_cli" >/dev/null 2>&1; then
+        fail "launcher trust helper must reject an unsafe visible replacement before classification"
+    fi
+    [ ! -e "$replacement_marker" ] || \
+        fail "launcher trust helper must not execute an unsafe pre-validation replacement"
+    mv "$codex_home/packages/standalone-rejected" "$codex_home/packages/standalone"
+
+    python3 - "$REPO_DIR/launcher/cli-launch-path.py" <<'PY'
+import importlib.util
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("cli_launch_path", path)
+assert spec is not None
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+euid = os.geteuid()
+untrusted_uid = 2 if euid == 1 else 1
+assert module.trusted_owner(euid)
+assert module.trusted_owner(0)
+assert not module.trusted_owner(untrusted_uid)
+PY
+
+    rm "$visible_cli"
+    ln -s "$codex_home/packages/standalone/current/bin/codex" "$visible_cli"
+    chmod 0755 "$(dirname "$visible_cli")"
+    chmod 0775 "$release/bin/codex"
+    if HOME="$trust_workspace/home" python3 "$REPO_DIR/launcher/cli-launch-path.py" "$visible_cli" >/dev/null 2>&1; then
+        fail "launcher trust helper must reject a group-writable standalone binary"
+    fi
+    chmod 0755 "$release/bin/codex"
+
+    local external_root="$trust_workspace/external"
+    mkdir -p "$external_root/bin"
+    cp "$release/bin/codex" "$external_root/bin/codex"
+    rm "$codex_home/packages/standalone/current"
+    ln -s "$external_root" "$codex_home/packages/standalone/current"
+    if python3 "$REPO_DIR/launcher/cli-launch-path.py" "$visible_cli" >/dev/null 2>&1; then
+        fail "launcher trust helper must reject an external standalone current symlink"
+    fi
 }
 
 test_webview_server_cache_policy() {
@@ -6851,6 +6989,7 @@ test_side_by_side_launcher_identity() {
 
     assert_file_exists "$app_dir/start.sh"
     assert_file_exists "$app_dir/.codex-linux/webview-server.py"
+    assert_file_exists "$app_dir/.codex-linux/cli-launch-path.py"
     assert_file_exists "$app_dir/.codex-linux/codex-cua-lab.png"
     cmp -s "$linux_icon_source" "$app_dir/.codex-linux/codex-cua-lab.png" \
         || fail "Expected side-by-side launcher icon to use CODEX_LINUX_ICON_SOURCE"

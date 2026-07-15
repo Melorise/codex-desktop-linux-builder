@@ -16,7 +16,7 @@ use tracing::info;
 
 const UPDATE_BUILDER_MANIFEST: &str = ".codex-linux/update-builder-manifest.txt";
 
-const REQUIRED_BUNDLE_FILES: [(&str, &str); 21] = [
+const REQUIRED_BUNDLE_FILES: [(&str, &str); 22] = [
     ("Cargo.toml", "Cargo.toml"),
     ("Cargo.lock", "Cargo.lock"),
     ("computer-use-linux", "computer-use-linux"),
@@ -34,6 +34,7 @@ const REQUIRED_BUNDLE_FILES: [(&str, &str); 21] = [
     ),
     ("install.sh", "install.sh"),
     ("launcher/start.sh.template", "launcher/start.sh.template"),
+    ("launcher/cli-launch-path.py", "launcher/cli-launch-path.py"),
     ("launcher/webview-server.py", "launcher/webview-server.py"),
     ("scripts/build-deb.sh", "scripts/build-deb.sh"),
     (
@@ -750,6 +751,10 @@ touch "${DIST_DIR_OVERRIDE}/codex-desktop-${VER}-1-x86_64.pkg.tar.zst"
             b"# fake launcher template\n",
         )?;
         fs::write(
+            bundle_root.join("launcher/cli-launch-path.py"),
+            b"# fake CLI launch path helper\n",
+        )?;
+        fs::write(
             bundle_root.join("launcher/webview-server.py"),
             b"# fake webview server\n",
         )?;
@@ -918,6 +923,10 @@ fi
             .exists());
         assert!(artifacts
             .workspace_dir
+            .join("builder/launcher/cli-launch-path.py")
+            .exists());
+        assert!(artifacts
+            .workspace_dir
             .join("builder/launcher/webview-server.py")
             .exists());
         assert!(artifacts
@@ -964,6 +973,10 @@ fi
             b"# fake launcher template\n",
         )?;
         fs::write(
+            source_root.join("launcher/cli-launch-path.py"),
+            b"# fake CLI launch path helper\n",
+        )?;
+        fs::write(
             source_root.join("launcher/webview-server.py"),
             b"# fake webview server\n",
         )?;
@@ -1000,6 +1013,9 @@ fi
         assert!(destination_root.join("scripts/build-deb.sh").exists());
         assert!(destination_root
             .join("scripts/patch-linux-window-ui.js")
+            .exists());
+        assert!(destination_root
+            .join("launcher/cli-launch-path.py")
             .exists());
         assert!(destination_root.join("launcher/webview-server.py").exists());
         assert_fresh_patch_bundle(&destination_root);
