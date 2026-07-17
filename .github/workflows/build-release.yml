@@ -1,0 +1,550 @@
+name: Build upstream release
+
+on:
+  schedule:
+    - cron: '15 7 * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Build even when this upstream source and DMG were already released
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-upstream-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: ilysenko/codex-desktop-linux
+  UPSTREAM_URL: https://github.com/ilysenko/codex-desktop-linux.git
+  UPSTREAM_DMG_URL: https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
+  UPSTREAM_DMG_PATH: /tmp/codex-desktop-linux-builder/Codex.dmg
+  DMG_CACHE_SCHEMA_VERSION: v1
+  BUILD_SCHEMA_VERSION: '1'
+  RELEASE_METADATA_SCHEMA_VERSION: '1'
+  RELEASE_ARCHITECTURE: x86_64
+
+jobs:
+  probe:
+    name: Probe upstream source and DMG
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      build_required: ${{ steps.identity.outputs.build_required }}
+      upstream_source_sha: ${{ steps.upstream.outputs.sha }}
+      dmg_cache_key: ${{ steps.identity.outputs.dmg_cache_key }}
+      dmg_sha256: ${{ steps.identity.outputs.dmg_sha256 }}
+      dmg_size_bytes: ${{ steps.identity.outputs.dmg_size_bytes }}
+      http_identity_key: ${{ steps.http.outputs.http_identity_key }}
+      etag: ${{ steps.http.outputs.etag }}
+      last_modified: ${{ steps.http.outputs.last_modified }}
+      content_length: ${{ steps.http.outputs.content_length }}
+      release_key: ${{ steps.identity.outputs.release_key }}
+
+    steps:
+      - name: Resolve exact upstream main commit
+        id: upstream
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sha="$(git ls-remote "$UPSTREAM_URL" refs/heads/main | awk 'NR == 1 {print $1}')"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo 'Could not resolve upstream main.' >&2
+            exit 1
+          }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Upstream source: \`$sha\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Capture normalized DMG HTTP identity
+        id: http
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          headers_file="$(mktemp)"
+          trap 'rm -f "$headers_file"' EXIT
+          curl -fsSLI --retry 3 "$UPSTREAM_DMG_URL" > "$headers_file"
+
+          last_modified="$(awk 'tolower($0) ~ /^last-modified:/ {sub(/\r$/,"",$0); sub(/^[^:]+: /,"",$0); print; exit}' "$headers_file")"
+          etag="$(awk 'tolower($0) ~ /^etag:/ {sub(/\r$/,"",$0); sub(/^[^:]+: /,"",$0); gsub(/"/,"",$0); print; exit}' "$headers_file")"
+          content_length="$(awk 'tolower($0) ~ /^content-length:/ {sub(/\r$/,"",$0); sub(/^[^:]+: /,"",$0); print; exit}' "$headers_file")"
+          last_modified="${last_modified:-unknown}"
+          etag="${etag:-no-etag}"
+          content_length="${content_length:-unknown}"
+
+          normalized_last_modified="$last_modified"
+          normalized_etag="$etag"
+          normalized_content_length="$content_length"
+          [ "$normalized_last_modified" = unknown ] && normalized_last_modified=''
+          [ "$normalized_etag" = no-etag ] && normalized_etag=''
+          [ "$normalized_content_length" = unknown ] && normalized_content_length=''
+          if [ -z "$normalized_etag" ] && { [ -z "$normalized_last_modified" ] || [ -z "$normalized_content_length" ]; }; then
+            echo 'The upstream DMG did not provide a stable HTTP identity.' >&2
+            exit 1
+          fi
+
+          identity_key="$(printf '%s|%s|%s\n' "$normalized_last_modified" "$normalized_etag" "$normalized_content_length" | sha256sum | cut -d' ' -f1)"
+          {
+            echo "last_modified=$last_modified"
+            echo "etag=$etag"
+            echo "content_length=$content_length"
+            echo "http_identity_key=$identity_key"
+            echo "dmg_http_cache_key=upstream-dmg-${DMG_CACHE_SCHEMA_VERSION}-http-${identity_key}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore DMG by HTTP identity
+        id: dmg-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.UPSTREAM_DMG_PATH }}
+          key: ${{ steps.http.outputs.dmg_http_cache_key }}
+
+      - name: Download or validate DMG
+        env:
+          CACHE_HIT: ${{ steps.dmg-cache.outputs.cache-hit }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$(dirname "$UPSTREAM_DMG_PATH")"
+          if [ "$CACHE_HIT" = true ]; then
+            test -s "$UPSTREAM_DMG_PATH"
+          else
+            rm -f "$UPSTREAM_DMG_PATH"
+            curl -fL --retry 3 -o "$UPSTREAM_DMG_PATH" "$UPSTREAM_DMG_URL"
+          fi
+          test -s "$UPSTREAM_DMG_PATH"
+
+      - name: Determine release identity
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SOURCE_SHA: ${{ steps.upstream.outputs.sha }}
+          FORCE_BUILD: ${{ inputs.force_build || 'false' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dmg_sha256="$(sha256sum "$UPSTREAM_DMG_PATH" | cut -d' ' -f1)"
+          dmg_size_bytes="$(stat -c '%s' "$UPSTREAM_DMG_PATH")"
+          release_key="${BUILD_SCHEMA_VERSION}|${RELEASE_ARCHITECTURE}|${UPSTREAM_SOURCE_SHA}|${dmg_sha256}"
+          build_required=true
+
+          if [ "$FORCE_BUILD" != true ]; then
+            releases="$(mktemp)"
+            trap 'rm -f "$releases"' EXIT
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              | jq 'add' > "$releases"
+            while IFS= read -r asset_id; do
+              [ -n "$asset_id" ] || continue
+              candidate="$(mktemp)"
+              if gh api -H 'Accept: application/octet-stream' \
+                  "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$candidate" \
+                && jq -e \
+                  --argjson schema "$RELEASE_METADATA_SCHEMA_VERSION" \
+                  --arg key "$release_key" \
+                  --arg upstream "$UPSTREAM_REPOSITORY" \
+                  '.schemaVersion == $schema and .releaseKey == $key and .upstream.repository == $upstream' \
+                  "$candidate" >/dev/null 2>&1; then
+                build_required=false
+                rm -f "$candidate"
+                break
+              fi
+              rm -f "$candidate"
+            done < <(
+              jq -r '.[] | select(.draft == false) | .assets[]? | select(.name == "release-metadata.json") | .id' "$releases"
+            )
+          fi
+
+          dmg_cache_key="upstream-dmg-${DMG_CACHE_SCHEMA_VERSION}-sha256-${dmg_sha256}"
+          {
+            echo "build_required=$build_required"
+            echo "dmg_cache_key=$dmg_cache_key"
+            echo "dmg_sha256=$dmg_sha256"
+            echo "dmg_size_bytes=$dmg_size_bytes"
+            echo "release_key=$release_key"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo
+            echo "DMG SHA-256: \`$dmg_sha256\`"
+            echo "Build required: \`$build_required\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cache authoritative DMG by SHA-256
+        if: steps.identity.outputs.build_required == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.UPSTREAM_DMG_PATH }}
+          key: ${{ steps.identity.outputs.dmg_cache_key }}
+
+  build:
+    name: Build and inspect DEB, RPM, and AppImage
+    needs: probe
+    if: needs.probe.outputs.build_required == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out trusted builder
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: builder
+          persist-credentials: false
+
+      - name: Check out exact upstream source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: ${{ needs.probe.outputs.upstream_source_sha }}
+          path: upstream
+          persist-credentials: false
+
+      - name: Apply builder packaging policy
+        shell: bash
+        run: bash builder/scripts/prepare-upstream.sh upstream
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Restore selected DMG
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.UPSTREAM_DMG_PATH }}
+          key: ${{ needs.probe.outputs.dmg_cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Verify selected DMG
+        env:
+          EXPECTED_DMG_SHA256: ${{ needs.probe.outputs.dmg_sha256 }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s  %s\n' "$EXPECTED_DMG_SHA256" "$UPSTREAM_DMG_PATH" | sha256sum --check --strict
+
+      - name: Install build and package dependencies
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y cpio file jq rpm squashfs-tools tar
+          NODEJS_MAJOR=24 SEVENZIP_SYSTEM_INSTALL=1 bash scripts/install-deps.sh
+          command -v 7zz
+          7zz > /tmp/7zz-version.txt 2>&1 || true
+          grep -m1 '7-Zip' /tmp/7zz-version.txt
+
+      - name: Install pinned AppImageTool without FUSE
+        env:
+          APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/appimagetool
+          curl -fL --retry 3 -o /tmp/appimagetool/appimagetool.AppImage "$APPIMAGETOOL_URL"
+          printf '%s  %s\n' "$APPIMAGETOOL_SHA256" /tmp/appimagetool/appimagetool.AppImage | sha256sum --check --strict
+          chmod 0755 /tmp/appimagetool/appimagetool.AppImage
+          (
+            cd /tmp/appimagetool
+            ./appimagetool.AppImage --appimage-extract >/dev/null
+          )
+          test -x /tmp/appimagetool/squashfs-root/AppRun
+          echo 'APPIMAGETOOL=/tmp/appimagetool/squashfs-root/AppRun' >> "$GITHUB_ENV"
+
+      - name: Record selected DMG metadata
+        working-directory: upstream
+        env:
+          DMG_SHA256: ${{ needs.probe.outputs.dmg_sha256 }}
+          DMG_SIZE_BYTES: ${{ needs.probe.outputs.dmg_size_bytes }}
+          ETAG: ${{ needs.probe.outputs.etag }}
+          LAST_MODIFIED: ${{ needs.probe.outputs.last_modified }}
+          CONTENT_LENGTH: ${{ needs.probe.outputs.content_length }}
+          HTTP_IDENTITY_KEY: ${{ needs.probe.outputs.http_identity_key }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -n \
+            --arg url "$UPSTREAM_DMG_URL" \
+            --arg path "$UPSTREAM_DMG_PATH" \
+            --arg etag "$ETAG" \
+            --arg last_modified "$LAST_MODIFIED" \
+            --arg content_length "$CONTENT_LENGTH" \
+            --arg identity_key "$HTTP_IDENTITY_KEY" \
+            --arg sha256 "$DMG_SHA256" \
+            --argjson size_bytes "$DMG_SIZE_BYTES" \
+            --arg tested_at_utc "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            --arg cache_schema_version "$DMG_CACHE_SCHEMA_VERSION" \
+            '{url:$url,path:$path,etag:$etag,last_modified:$last_modified,content_length:$content_length,http_identity_key:$identity_key,sha256:$sha256,size_bytes:$size_bytes,tested_at_utc:$tested_at_utc,cache_schema_version:$cache_schema_version}' \
+            > upstream-dmg-metadata.json
+
+      - name: Build app from selected DMG
+        id: acceptance-build
+        continue-on-error: true
+        working-directory: upstream
+        env:
+          CODEX_ACCEPTANCE_OVERRIDE: '0'
+          CODEX_ACCEPTANCE_SOURCE: github-actions-release
+          CODEX_ACCEPTANCE_DECISION_JSON: ${{ github.workspace }}/upstream/upstream-dmg-decision.json
+          CODEX_UPSTREAM_DMG_METADATA_JSON: ${{ github.workspace }}/upstream/upstream-dmg-metadata.json
+          CODEX_LINUX_SOURCE_BRANCH: main
+          CODEX_LINUX_SOURCE_COMMIT: ${{ needs.probe.outputs.upstream_source_sha }}
+          CODEX_LINUX_SOURCE_REMOTE: https://github.com/ilysenko/codex-desktop-linux.git
+          REBUILD_REPORT_DIR: ${{ github.workspace }}/upstream/upstream-acceptance
+        shell: bash
+        run: make build-app DMG="$UPSTREAM_DMG_PATH"
+
+      - name: Enforce acceptance decision
+        if: always()
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test '${{ steps.acceptance-build.outcome }}' = success
+          test -f upstream-dmg-decision.json
+          verdict="$(jq -r '.verdict // empty' upstream-dmg-decision.json)"
+          case "$verdict" in
+            accepted|accepted_with_warnings) ;;
+            *) echo "Upstream DMG verdict is not publishable: ${verdict:-missing}" >&2; exit 1 ;;
+          esac
+          test "$(jq -r '.dmg.sha256 // empty' upstream-dmg-decision.json)" = '${{ needs.probe.outputs.dmg_sha256 }}'
+
+      - name: Derive release version
+        id: version
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          app_version="$(jq -r '.dmg.appVersion // empty' upstream-dmg-decision.json)"
+          if [[ ! "$app_version" =~ ^[0-9][0-9A-Za-z.~]*$ ]]; then
+            echo "Invalid upstream app version: $app_version" >&2
+            exit 1
+          fi
+          build_timestamp="$(TZ=Asia/Shanghai date '+%y%m%d%H%M')"
+          package_version="${app_version}+build${build_timestamp}"
+          {
+            echo "app_version=$app_version"
+            echo "build_timestamp=$build_timestamp"
+            echo "package_version=$package_version"
+            echo "tag=v${package_version}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build packages without updater
+        working-directory: upstream
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+          PACKAGE_WITH_UPDATER: '0'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PACKAGE_VERSION="$PACKAGE_VERSION" ./scripts/build-deb.sh
+          PACKAGE_VERSION="$PACKAGE_VERSION" ./scripts/build-rpm.sh
+          PACKAGE_VERSION="$PACKAGE_VERSION" APPIMAGETOOL="$APPIMAGETOOL" ./scripts/build-appimage.sh
+
+      - name: Inspect all package formats
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+          EXPECTED_DMG_SHA256: ${{ needs.probe.outputs.dmg_sha256 }}
+          EXPECTED_UPSTREAM_SOURCE_SHA: ${{ needs.probe.outputs.upstream_source_sha }}
+        shell: bash
+        run: bash builder/scripts/inspect-packages.sh upstream
+
+      - name: Assemble release bundle
+        env:
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
+          BUILD_TIMESTAMP: ${{ steps.version.outputs.build_timestamp }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_KEY: ${{ needs.probe.outputs.release_key }}
+          UPSTREAM_SOURCE_SHA: ${{ needs.probe.outputs.upstream_source_sha }}
+          DMG_SHA256: ${{ needs.probe.outputs.dmg_sha256 }}
+          DMG_SIZE_BYTES: ${{ needs.probe.outputs.dmg_size_bytes }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf release-assets
+          mkdir release-assets
+          cp upstream/dist/*.deb upstream/dist/*.rpm upstream/dist/*.AppImage release-assets/
+          cp upstream/upstream-dmg-decision.json release-assets/
+          (
+            cd release-assets
+            sha256sum ./*.deb ./*.rpm ./*.AppImage > SHA256SUMS
+          )
+
+          verdict="$(jq -r '.verdict' upstream/upstream-dmg-decision.json)"
+          http_identity="$(jq -c '.dmg.httpIdentity' upstream/upstream-dmg-decision.json)"
+          test "$http_identity" != null
+          assets_json="$(
+            for asset in release-assets/*.deb release-assets/*.rpm release-assets/*.AppImage; do
+              jq -n \
+                --arg name "$(basename "$asset")" \
+                --argjson sizeBytes "$(stat -c '%s' "$asset")" \
+                --arg sha256 "$(sha256sum "$asset" | cut -d' ' -f1)" \
+                '{name:$name,sizeBytes:$sizeBytes,sha256:$sha256}'
+            done | jq -s 'sort_by(.name)'
+          )"
+
+          jq -n \
+            --argjson schemaVersion "$RELEASE_METADATA_SCHEMA_VERSION" \
+            --arg buildSchemaVersion "$BUILD_SCHEMA_VERSION" \
+            --arg releaseKey "$RELEASE_KEY" \
+            --arg tag "$RELEASE_TAG" \
+            --arg packageVersion "$PACKAGE_VERSION" \
+            --arg buildTimestamp "$BUILD_TIMESTAMP" \
+            --arg architecture "$RELEASE_ARCHITECTURE" \
+            --arg upstreamRepository "$UPSTREAM_REPOSITORY" \
+            --arg upstreamSourceSha "$UPSTREAM_SOURCE_SHA" \
+            --arg builderRepository "$GITHUB_REPOSITORY" \
+            --arg builderSourceSha "$GITHUB_SHA" \
+            --arg dmgUrl "$UPSTREAM_DMG_URL" \
+            --argjson httpIdentity "$http_identity" \
+            --arg dmgSha256 "$DMG_SHA256" \
+            --argjson dmgSizeBytes "$DMG_SIZE_BYTES" \
+            --arg appVersion "$APP_VERSION" \
+            --arg verdict "$verdict" \
+            --arg builtAt "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            --arg workflowRunUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --argjson assets "$assets_json" \
+            '{schemaVersion:$schemaVersion,buildSchemaVersion:$buildSchemaVersion,releaseKey:$releaseKey,tag:$tag,packageVersion:$packageVersion,buildTimestamp:$buildTimestamp,architecture:$architecture,upstream:{repository:$upstreamRepository,sourceSha:$upstreamSourceSha},builder:{repository:$builderRepository,sourceSha:$builderSourceSha},dmg:{url:$dmgUrl,httpIdentity:$httpIdentity,sha256:$dmgSha256,sizeBytes:$dmgSizeBytes,appVersion:$appVersion},acceptance:{verdict:$verdict},assets:$assets,builtAt:$builtAt,workflowRunUrl:$workflowRunUrl}' \
+            > release-assets/release-metadata.json
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-bundle
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 5
+
+      - name: Upload acceptance diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: acceptance-${{ github.run_id }}
+          path: |
+            upstream/upstream-dmg-metadata.json
+            upstream/upstream-dmg-decision.json
+            upstream/upstream-acceptance/**/*.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  publish:
+    name: Publish complete GitHub Release
+    needs: [probe, build]
+    if: needs.probe.outputs.build_required == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download trusted release bundle
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-bundle
+          path: release-assets
+
+      - name: Verify and publish release atomically
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd release-assets
+          shopt -s nullglob
+          debs=(./*.deb)
+          rpms=(./*.rpm)
+          appimages=(./*.AppImage)
+          [ "${#debs[@]}" -eq 1 ]
+          [ "${#rpms[@]}" -eq 1 ]
+          [ "${#appimages[@]}" -eq 1 ]
+          test -f SHA256SUMS
+          test -f release-metadata.json
+          test -f upstream-dmg-decision.json
+          test "$(wc -l < SHA256SUMS)" -eq 3
+          sha256sum --check --strict SHA256SUMS
+          jq -e \
+            --argjson schema "$RELEASE_METADATA_SCHEMA_VERSION" \
+            --arg arch "$RELEASE_ARCHITECTURE" \
+            --arg builder "$GITHUB_REPOSITORY" \
+            --arg builder_sha "$GITHUB_SHA" \
+            '.schemaVersion == $schema and .architecture == $arch and .builder.repository == $builder and .builder.sourceSha == $builder_sha and (.assets | length == 3)' \
+            release-metadata.json >/dev/null
+          jq -e '.verdict == "accepted" or .verdict == "accepted_with_warnings"' upstream-dmg-decision.json >/dev/null
+
+          while IFS=$'\t' read -r name size sha; do
+            test -f "$name"
+            test "$(stat -c '%s' "$name")" = "$size"
+            test "$(sha256sum "$name" | cut -d' ' -f1)" = "$sha"
+          done < <(jq -r '.assets[] | [.name, .sizeBytes, .sha256] | @tsv' release-metadata.json)
+
+          tag="$(jq -r '.tag' release-metadata.json)"
+          package_version="$(jq -r '.packageVersion' release-metadata.json)"
+          app_version="$(jq -r '.dmg.appVersion' release-metadata.json)"
+          upstream_sha="$(jq -r '.upstream.sourceSha' release-metadata.json)"
+          release_key="$(jq -r '.releaseKey' release-metadata.json)"
+          marker="<!-- builder-release-key: $release_key -->"
+          notes="$(mktemp)"
+          cat > "$notes" <<NOTES
+          $marker
+
+          Community-built ChatGPT Desktop packages for Linux x86-64.
+
+          - Upstream application version: \`$app_version\`
+          - Upstream source: https://github.com/$UPSTREAM_REPOSITORY/commit/$upstream_sha
+          - DMG SHA-256: \`$(jq -r '.dmg.sha256' release-metadata.json)\`
+          - Acceptance verdict: \`$(jq -r '.acceptance.verdict' release-metadata.json)\`
+          - No local update manager is bundled.
+
+          Install the DEB with \`sudo apt install ./<file>.deb\`, the RPM with
+          \`sudo dnf install ./<file>.rpm\`, or make the AppImage executable and run it.
+
+          These are community Linux builds produced from the upstream macOS DMG; they are not official OpenAI Linux binaries.
+          NOTES
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release tag already exists: $tag" >&2
+            exit 1
+          fi
+
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "ChatGPT Desktop for Linux $package_version" \
+            --notes-file "$notes" \
+            --draft
+
+          gh release upload "$tag" ./* --repo "$GITHUB_REPOSITORY"
+
+          release_id=''
+          for attempt in {1..10}; do
+            release_id="$(
+              gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+                | jq -r --arg tag "$tag" 'add | .[] | select(.tag_name == $tag) | .id' \
+                | head -n1
+            )"
+            [ -n "$release_id" ] && break
+            sleep 2
+          done
+          [ -n "$release_id" ] || {
+            echo "Draft release did not become visible: $tag" >&2
+            exit 1
+          }
+
+          expected_names="$(find . -maxdepth 1 -type f -printf '%f\n' | sort)"
+          remote_names="$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq '.assets[].name' | sort)"
+          [ "$remote_names" = "$expected_names" ] || {
+            echo 'Remote release asset set is incomplete.' >&2
+            diff -u <(printf '%s\n' "$expected_names") <(printf '%s\n' "$remote_names") || true
+            exit 1
+          }
+
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            -F draft=false -f make_latest=true >/dev/null
+          echo "Published complete release: $tag"
