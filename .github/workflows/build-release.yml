@@ -29,8 +29,42 @@ env:
   RELEASE_ARCHITECTURE: x86_64
 
 jobs:
+  heartbeat:
+    name: Refresh repository activity
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      builder_source_sha: ${{ steps.commit.outputs.builder_source_sha }}
+
+    steps:
+      - name: Check out default branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Commit current activity timestamp
+        id: commit
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          date -u '+%Y-%m-%dT%H:%M:%SZ' > .github/last-activity
+          git add .github/last-activity
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'chore: refresh workflow activity'
+          git push origin "HEAD:$DEFAULT_BRANCH"
+          builder_source_sha="$(git rev-parse HEAD)"
+          echo "builder_source_sha=$builder_source_sha" >> "$GITHUB_OUTPUT"
+          echo "Builder source: \`$builder_source_sha\`" >> "$GITHUB_STEP_SUMMARY"
+
   probe:
     name: Probe upstream source and DMG
+    needs: heartbeat
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     permissions:
@@ -182,7 +216,7 @@ jobs:
 
   build:
     name: Build and inspect DEB, RPM, and AppImage
-    needs: probe
+    needs: [heartbeat, probe]
     if: needs.probe.outputs.build_required == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 150
@@ -193,6 +227,7 @@ jobs:
       - name: Check out trusted builder
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ needs.heartbeat.outputs.builder_source_sha }}
           path: builder
           persist-credentials: false
 
@@ -363,6 +398,7 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           RELEASE_KEY: ${{ needs.probe.outputs.release_key }}
           UPSTREAM_SOURCE_SHA: ${{ needs.probe.outputs.upstream_source_sha }}
+          BUILDER_SOURCE_SHA: ${{ needs.heartbeat.outputs.builder_source_sha }}
           DMG_SHA256: ${{ needs.probe.outputs.dmg_sha256 }}
           DMG_SIZE_BYTES: ${{ needs.probe.outputs.dmg_size_bytes }}
         shell: bash
@@ -401,7 +437,7 @@ jobs:
             --arg upstreamRepository "$UPSTREAM_REPOSITORY" \
             --arg upstreamSourceSha "$UPSTREAM_SOURCE_SHA" \
             --arg builderRepository "$GITHUB_REPOSITORY" \
-            --arg builderSourceSha "$GITHUB_SHA" \
+            --arg builderSourceSha "$BUILDER_SOURCE_SHA" \
             --arg dmgUrl "$UPSTREAM_DMG_URL" \
             --argjson httpIdentity "$http_identity" \
             --arg dmgSha256 "$DMG_SHA256" \
@@ -436,7 +472,7 @@ jobs:
 
   publish:
     name: Publish complete GitHub Release
-    needs: [probe, build]
+    needs: [heartbeat, probe, build]
     if: needs.probe.outputs.build_required == 'true' && needs.build.result == 'success'
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -453,6 +489,7 @@ jobs:
       - name: Verify and publish release atomically
         env:
           GH_TOKEN: ${{ github.token }}
+          BUILDER_SOURCE_SHA: ${{ needs.heartbeat.outputs.builder_source_sha }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -473,7 +510,7 @@ jobs:
             --argjson schema "$RELEASE_METADATA_SCHEMA_VERSION" \
             --arg arch "$RELEASE_ARCHITECTURE" \
             --arg builder "$GITHUB_REPOSITORY" \
-            --arg builder_sha "$GITHUB_SHA" \
+            --arg builder_sha "$BUILDER_SOURCE_SHA" \
             '.schemaVersion == $schema and .architecture == $arch and .builder.repository == $builder and .builder.sourceSha == $builder_sha and (.assets | length == 3)' \
             release-metadata.json >/dev/null
           jq -e '.verdict == "accepted" or .verdict == "accepted_with_warnings"' upstream-dmg-decision.json >/dev/null
@@ -515,7 +552,7 @@ jobs:
 
           gh release create "$tag" \
             --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
+            --target "$BUILDER_SOURCE_SHA" \
             --title "ChatGPT Desktop for Linux $package_version" \
             --notes-file "$notes" \
             --draft
