@@ -1424,6 +1424,12 @@ test("Linux remote-control load gate enables remote-control environment loading"
   assert.equal(applyLinuxRemoteControlLoadGatePatch(patched), patched);
 });
 
+test("Linux remote-control load gate rejects non-current quote shapes", () => {
+  const source = "function f(){return c(\"1042620455\")}";
+
+  assert.equal(applyLinuxRemoteControlLoadGatePatch(source), source);
+});
+
 test("Linux remote-control feature sync forces remote_control and preserves remote_plugin on Linux", () => {
   const source = syntheticAppMainFeatureSyncBundle();
   const patched = applyLinuxRemoteControlFeatureSyncPatch(source);
