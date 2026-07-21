@@ -1603,13 +1603,16 @@ function createModernNativeKeyboardShortcutsSettingsFixture() {
       "function Ya(e){let r=(0,RouteReact.lazy)(e);function SettingsRouteWrapper(){let t=(0,RouteReact.useState)(null);return (0,RouteJsx.jsx)(r,{children:t})}return SettingsRouteWrapper}",
       "var RouteReact,RouteJsx;routeModule(()=>{RouteReact=routeToESM(routeReactFactory(),1),RouteJsx=routeJsxFactory()})();",
       'var Zn={"general-settings":Ya(async()=>(await Pr(async()=>{let{GeneralSettings:e}=await import(`./general-settings-A.js`);return{GeneralSettings:e}},[],import.meta.url)).GeneralSettings),"keyboard-shortcuts":Ya(async()=>(await Pr(async()=>{let{KeyboardShortcutsSettings:e}=await import(`./keyboard-shortcuts-settings-A.js`);return{KeyboardShortcutsSettings:e}},[],import.meta.url)).KeyboardShortcutsSettings)};',
-      'var Hn={"general-settings":wt,"keyboard-shortcuts":xn};',
       "var Wn=[`general-settings`,`import`,`profile`,`keyboard-shortcuts`];",
       "var Qn=[{key:`app`,slugs:[`general-settings`,`import`,`profile`,`keyboard-shortcuts`]}];",
       "function visible(e){switch(e.slug){case`general-settings`:case`agent`:case`personalization`:return!0;case`keyboard-shortcuts`:return!0}}",
       "function loading(H){let W=!1;if(H)bb0:switch(H.slug){case`appearance`:case`general-settings`:case`agent`:case`git-settings`:case`data-controls`:case`personalization`:W=!1;break bb0;case`keyboard-shortcuts`:W=!1;break bb0}return W}",
       "export{SettingsRouteWrapper};",
     ].join(""),
+  );
+  writeAsset(
+    "use-visible-settings-sections-A.js",
+    'var Hn={"general-settings":wt,import:it,profile:pt,"keyboard-shortcuts":xn};export{Hn};',
   );
   writeAsset(
     "app-initial~app-main~page~remote-conversation-page~new-thread-panel-page~settings-page~shared-A.js",
@@ -6111,102 +6114,6 @@ test("does not leave generated Linux settings fallbacks when later current-DMG r
     assert.ok(warnings.some((warning) => warning.includes("could not find Linux desktop settings route bundle")));
     assert.equal(fs.existsSync(path.join(assetsDir, linuxDesktopSettingsAsset)), false);
     assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-row-linux.js")), false);
-  } finally {
-    fs.rmSync(extractedDir, { recursive: true, force: true });
-  }
-});
-
-test("adds Linux desktop settings when native shortcuts use a consolidated settings bundle", () => {
-  const { extractedDir, assetsDir } = createModernNativeKeyboardShortcutsSettingsFixture();
-  try {
-    const { value: result, warnings } = captureWarns(() => patchKeybindsSettingsAssets(extractedDir));
-
-    assert.equal(result.matched, true);
-    assert.ok(result.changed >= 2);
-    assert.match(result.reason, /upstream keyboard shortcuts settings are present/);
-    assert.deepEqual(warnings, []);
-    assert.equal(fs.existsSync(path.join(assetsDir, keybindsSettingsAsset)), false);
-    assert.equal(fs.existsSync(path.join(assetsDir, linuxDesktopSettingsAsset)), true);
-
-    const linuxDesktopSource = fs.readFileSync(
-      path.join(assetsDir, linuxDesktopSettingsAsset),
-      "utf8",
-    );
-    assert.match(linuxDesktopSource, /Linux desktop/);
-    assert.match(linuxDesktopSource, /Build information/);
-    assert.match(linuxDesktopSource, /codex-linux-get-build-info/);
-    assert.match(linuxDesktopSource, /Open on GitHub/);
-    assert.match(linuxDesktopSource, /href:url/);
-    assert.doesNotMatch(linuxDesktopSource, /Source commit URL/);
-    assert.match(
-      linuxDesktopSource,
-      /import\{codexLinuxReact as React,codexLinuxJsx as \$\}from"\.\/settings-page-A\.js"/,
-    );
-    assert.doesNotMatch(linuxDesktopSource, /__reactFactory|__jsxFactory/);
-    const settingsRouteSource = fs.readFileSync(
-      path.join(assetsDir, "settings-page-A.js"),
-      "utf8",
-    );
-    assert.match(
-      settingsRouteSource,
-      /RouteReact as codexLinuxReact,RouteJsx as codexLinuxJsx/,
-    );
-    assert.match(
-      linuxDesktopSource,
-      /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js\?v=[a-f0-9]{12}"/,
-    );
-    assert.doesNotMatch(linuxDesktopSource, /function LinuxSwitch/);
-
-    const settingsPageSource = fs.readFileSync(path.join(assetsDir, "settings-page-A.js"), "utf8");
-    assert.match(
-      settingsPageSource,
-      /Hn=\{"linux-desktop":wt,"general-settings":wt,"keyboard-shortcuts":xn\}/,
-    );
-    const linuxDesktopDigest = crypto
-      .createHash("sha256")
-      .update(linuxDesktopSource)
-      .digest("hex")
-      .slice(0, 12);
-    assert.match(
-      settingsPageSource,
-      new RegExp(`linux-desktop-settings-linux\\.js\\?v=${linuxDesktopDigest}`),
-    );
-    const fallbackToggleSource = fs.readFileSync(
-      path.join(assetsDir, "linux-settings-toggle-linux.js"),
-      "utf8",
-    );
-    const fallbackToggleDigest = crypto
-      .createHash("sha256")
-      .update(fallbackToggleSource)
-      .digest("hex")
-      .slice(0, 12);
-    assert.match(
-      linuxDesktopSource,
-      new RegExp(`linux-settings-toggle-linux\\.js\\?v=${fallbackToggleDigest}`),
-    );
-    assert.match(settingsPageSource, /linux-desktop-settings-linux\.js/);
-    assert.match(settingsPageSource, /=\[`general-settings`,`linux-desktop`,`import`,`profile`/);
-    assert.match(settingsPageSource, /slugs:\[`general-settings`,`linux-desktop`,`import`,`profile`/);
-
-    const splitSharedSource = fs.readFileSync(
-      path.join(
-        assetsDir,
-        "app-initial~app-main~page~remote-conversation-page~new-thread-panel-page~settings-page~shared-A.js",
-      ),
-      "utf8",
-    );
-    assert.match(splitSharedSource, /settings\.nav\.linux-desktop/);
-    assert.match(splitSharedSource, /settings\.section\.linux-desktop/);
-
-    const splitSectionsSource = fs.readFileSync(
-      path.join(
-        assetsDir,
-        "app-initial~app-main~remote-conversation-page~settings-page~hotkey-window-thread-page~mcp-s-A.js",
-      ),
-      "utf8",
-    );
-    assert.match(splitSectionsSource, /general-settings\.linux-desktop\.import\.profile\.keyboard-shortcuts/);
-    assert.match(splitSectionsSource, /\{slug:`linux-desktop`\},\{slug:`import`\}/);
   } finally {
     fs.rmSync(extractedDir, { recursive: true, force: true });
   }

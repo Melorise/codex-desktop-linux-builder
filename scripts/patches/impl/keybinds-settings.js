@@ -637,7 +637,7 @@ function collectLinuxDesktopIconMapPatches(extractedDir) {
 
   const candidates = fs
     .readdirSync(webviewAssetsDir)
-    .filter((name) => name.endsWith(".js"))
+    .filter((name) => /^use-visible-settings-sections-.*\.js$/.test(name))
     .sort()
     .filter((name) => {
       const source = fs.readFileSync(path.join(webviewAssetsDir, name), "utf8");
