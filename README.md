@@ -12,7 +12,7 @@
 
 ## Nix 与 Cachix
 
-Release workflow 会从与原生包相同的上游提交构建 `x86_64-linux` Nix
+Release workflow 会从与原生包相同的上游提交构建默认的 `x86_64-linux` Nix
 flake 输出，并在发布 Release 前将完整闭包上传到 Cachix。Nix 构建使用独立、
 未应用 builder 打包策略的上游 checkout，确保缓存路径与用户直接引用上游提交时
 一致。
@@ -22,10 +22,17 @@ flake 输出，并在发布 Release 前将完整闭包上传到 Cachix。Nix 构
 1. 在 Cachix 创建一个缓存。
 2. 在 GitHub 仓库的 Actions variables 中设置 `CACHIX_CACHE_NAME`，值为缓存名。
 3. 在 Actions secrets 中设置 `CACHIX_AUTH_TOKEN`，值为该缓存的 write token。
+4. 在 Cachix 缓存设置中启用 Garbage Collection。
 
 缺少任一配置时 Nix job 会失败，Release 不会发布。workflow 还会校验上游
 `flake.nix` 固定的 DMG 哈希与本次 Release 使用的 DMG 完全一致，避免上传与
 Release 内容不对应的缓存。
+
+workflow 使用固定 pin `codex-desktop-x86_64-linux`，并设置
+`--keep-revisions 1`。每次成功上传会让上一版失去 pin；Cachix Garbage
+Collection 随后可以删除不再被最新版引用的旧闭包。GitHub Release 本身不会
+删除，但旧 Release 对应的 Nix 包在缓存回收后会回退到本地构建。为控制免费版
+容量，功能变体和 installer 不会上传到 Cachix。
 
 发布后可按 Release notes 中记录的上游提交使用：
 

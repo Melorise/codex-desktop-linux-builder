@@ -24,10 +24,12 @@ env:
   UPSTREAM_DMG_URL: https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
   UPSTREAM_DMG_PATH: /tmp/codex-desktop-linux-builder/Codex.dmg
   DMG_CACHE_SCHEMA_VERSION: v1
-  BUILD_SCHEMA_VERSION: '2'
+  BUILD_SCHEMA_VERSION: '3'
   RELEASE_METADATA_SCHEMA_VERSION: '1'
   RELEASE_ARCHITECTURE: x86_64
   CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
+  CACHIX_PIN_NAME: codex-desktop-x86_64-linux
+  CACHIX_KEEP_REVISIONS: '1'
 
 jobs:
   heartbeat:
@@ -429,7 +431,7 @@ jobs:
           http_identity="$(jq -c '.dmg.httpIdentity' upstream/upstream-dmg-decision.json)"
           test "$http_identity" != null
           test -n "$CACHIX_CACHE_NAME"
-          nix_outputs='["codex-desktop","codex-desktop-computer-use-ui","codex-desktop-remote-mobile-control","codex-desktop-computer-use-ui-remote-mobile-control","checks.x86_64-linux.watchdog-linux-features","installer"]'
+          nix_outputs='["codex-desktop"]'
           assets_json="$(
             for asset in release-assets/*.deb release-assets/*.rpm release-assets/*.AppImage; do
               jq -n \
@@ -461,12 +463,14 @@ jobs:
             --arg nixSystem "x86_64-linux" \
             --arg cachixCacheName "$CACHIX_CACHE_NAME" \
             --arg cachixUrl "https://${CACHIX_CACHE_NAME}.cachix.org" \
+            --arg cachixPinName "$CACHIX_PIN_NAME" \
+            --argjson cachixKeepRevisions "$CACHIX_KEEP_REVISIONS" \
             --arg flakeRef "github:${UPSTREAM_REPOSITORY}/${UPSTREAM_SOURCE_SHA}" \
             --argjson nixOutputs "$nix_outputs" \
             --arg builtAt "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
             --arg workflowRunUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --argjson assets "$assets_json" \
-            '{schemaVersion:$schemaVersion,buildSchemaVersion:$buildSchemaVersion,releaseKey:$releaseKey,tag:$tag,packageVersion:$packageVersion,buildTimestamp:$buildTimestamp,architecture:$architecture,upstream:{repository:$upstreamRepository,sourceSha:$upstreamSourceSha},builder:{repository:$builderRepository,sourceSha:$builderSourceSha},dmg:{url:$dmgUrl,httpIdentity:$httpIdentity,sha256:$dmgSha256,sizeBytes:$dmgSizeBytes,appVersion:$appVersion},acceptance:{verdict:$verdict},nix:{system:$nixSystem,flakeRef:$flakeRef,outputs:$nixOutputs,cachix:{name:$cachixCacheName,url:$cachixUrl}},assets:$assets,builtAt:$builtAt,workflowRunUrl:$workflowRunUrl}' \
+            '{schemaVersion:$schemaVersion,buildSchemaVersion:$buildSchemaVersion,releaseKey:$releaseKey,tag:$tag,packageVersion:$packageVersion,buildTimestamp:$buildTimestamp,architecture:$architecture,upstream:{repository:$upstreamRepository,sourceSha:$upstreamSourceSha},builder:{repository:$builderRepository,sourceSha:$builderSourceSha},dmg:{url:$dmgUrl,httpIdentity:$httpIdentity,sha256:$dmgSha256,sizeBytes:$dmgSizeBytes,appVersion:$appVersion},acceptance:{verdict:$verdict},nix:{system:$nixSystem,flakeRef:$flakeRef,outputs:$nixOutputs,cachix:{name:$cachixCacheName,url:$cachixUrl,pin:$cachixPinName,keepRevisions:$cachixKeepRevisions}},assets:$assets,builtAt:$builtAt,workflowRunUrl:$workflowRunUrl}' \
             > release-assets/release-metadata.json
 
       - name: Upload release bundle
@@ -560,31 +564,31 @@ jobs:
           authToken: ${{ env.CACHIX_AUTH_TOKEN }}
           skipPush: true
 
-      - name: Build and upload Nix outputs
+      - name: Build, upload, and pin the Nix package
         working-directory: upstream-nix
         shell: bash
         run: |
           set -Eeuo pipefail
-          outputs=(
-            .#codex-desktop
-            .#codex-desktop-computer-use-ui
-            .#codex-desktop-remote-mobile-control
-            .#codex-desktop-computer-use-ui-remote-mobile-control
-            .#checks.x86_64-linux.watchdog-linux-features
-            .#installer
-          )
+          output=.#codex-desktop
+          store_paths_file="$RUNNER_TEMP/cachix-store-paths"
+          nix build "$output" \
+            --no-link \
+            --print-build-logs \
+            --print-out-paths > "$store_paths_file"
 
-          for output in "${outputs[@]}"; do
-            echo "Building $output"
-            store_paths_file="$RUNNER_TEMP/cachix-store-paths"
-            nix build "$output" \
-              --no-link \
-              --print-build-logs \
-              --print-out-paths > "$store_paths_file"
-            test -s "$store_paths_file"
-            cachix push "$CACHIX_CACHE_NAME" < "$store_paths_file"
-            nix store gc
-          done
+          mapfile -t store_paths < "$store_paths_file"
+          if [ "${#store_paths[@]}" -ne 1 ]; then
+            echo "Expected exactly one Nix store path, got ${#store_paths[@]}." >&2
+            exit 1
+          fi
+          store_path="${store_paths[0]}"
+
+          printf '%s\n' "$store_path" | cachix push "$CACHIX_CACHE_NAME"
+          cachix pin \
+            "$CACHIX_CACHE_NAME" \
+            "$CACHIX_PIN_NAME" \
+            "$store_path" \
+            --keep-revisions "$CACHIX_KEEP_REVISIONS"
 
           {
             echo '## Nix and Cachix'
@@ -592,7 +596,9 @@ jobs:
             echo "- Upstream source: \`${{ needs.probe.outputs.upstream_source_sha }}\`"
             echo "- System: \`x86_64-linux\`"
             echo "- Cache: \`$CACHIX_CACHE_NAME\`"
-            printf -- '- Uploaded: `%s`\n' "${outputs[@]}"
+            echo "- Uploaded: \`$output\`"
+            echo "- Pin: \`$CACHIX_PIN_NAME\`"
+            echo "- Retained revisions: \`$CACHIX_KEEP_REVISIONS\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
@@ -636,7 +642,7 @@ jobs:
             --arg arch "$RELEASE_ARCHITECTURE" \
             --arg builder "$GITHUB_REPOSITORY" \
             --arg builder_sha "$BUILDER_SOURCE_SHA" \
-            '.schemaVersion == $schema and .architecture == $arch and .builder.repository == $builder and .builder.sourceSha == $builder_sha and .nix.system == "x86_64-linux" and (.nix.cachix.name | length > 0) and (.nix.outputs | length == 6) and (.assets | length == 3)' \
+            '.schemaVersion == $schema and .architecture == $arch and .builder.repository == $builder and .builder.sourceSha == $builder_sha and .nix.system == "x86_64-linux" and (.nix.cachix.name | length > 0) and .nix.cachix.pin == "codex-desktop-x86_64-linux" and .nix.cachix.keepRevisions == 1 and .nix.outputs == ["codex-desktop"] and (.assets | length == 3)' \
             release-metadata.json >/dev/null
           jq -e '.verdict == "accepted" or .verdict == "accepted_with_warnings"' upstream-dmg-decision.json >/dev/null
 
