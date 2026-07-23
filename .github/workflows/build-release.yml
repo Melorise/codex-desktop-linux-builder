@@ -623,15 +623,27 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:
-      contents: write
+      contents: read
 
     steps:
+      - name: Validate Nix branch token
+        env:
+          NIX_BRANCH_TOKEN: ${{ secrets.NIX_BRANCH_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$NIX_BRANCH_TOKEN" || {
+            echo 'Repository secret NIX_BRANCH_TOKEN is required.' >&2
+            exit 1
+          }
+
       - name: Check out trusted builder with push credentials
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.heartbeat.outputs.builder_source_sha }}
           path: builder
           fetch-depth: 0
+          token: ${{ secrets.NIX_BRANCH_TOKEN }}
 
       - name: Check out the successfully cached upstream source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

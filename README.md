@@ -19,7 +19,9 @@ flake 输出，并在发布 Release 前将完整闭包上传到 Cachix。Nix 构
 
 缓存上传和 pin 成功后，workflow 会将 builder 仓库的 `nix` 分支直接推进到
 本次构建的上游 commit。该分支不包含复制文件或二次提交，始终指向最近一次成功
-构建并缓存的上游源码。构建或上传失败时不会更新该分支。
+构建并缓存的上游源码。由于上游 commit 包含 GitHub workflow 文件，分支推送使用
+专用 `NIX_BRANCH_TOKEN`；默认 `GITHUB_TOKEN` 没有更新 workflow 文件所需的权限。
+构建或上传失败时不会更新该分支。
 
 启用前需要完成以下仓库配置：
 
@@ -27,7 +29,10 @@ flake 输出，并在发布 Release 前将完整闭包上传到 Cachix。Nix 构
 2. 在 GitHub 仓库的 Actions variables 中设置 `CACHIX_CACHE_NAME`，值为缓存名。
 3. 在 Actions variables 中设置 `CACHIX_PUBLIC_KEY`，值为缓存页面显示的 public signing key。
 4. 在 Actions secrets 中设置 `CACHIX_AUTH_TOKEN`，值为该缓存的 write token。
-5. 在 Cachix 缓存设置中启用 Garbage Collection。
+5. 在 Actions secrets 中设置 `NIX_BRANCH_TOKEN`。使用 classic PAT 时需要
+   `repo` 和 `workflow` scopes；使用 fine-grained PAT 时需要本仓库的 Contents
+   与 Workflows read/write 权限。
+6. 在 Cachix 缓存设置中启用 Garbage Collection。
 
 缺少任一配置时 Nix job 会失败，Release 不会发布。workflow 还会校验上游
 `flake.nix` 固定的 DMG 哈希与本次 Release 使用的 DMG 完全一致，避免上传与
