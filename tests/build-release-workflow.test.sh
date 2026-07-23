@@ -29,6 +29,16 @@ grep -F 'needs: [heartbeat, probe, build, nix, promote_nix_branch]' "$workflow"
 grep -F "needs.promote_nix_branch.result == 'success'" "$workflow"
 grep -F 'url = "$nix_flake_ref";' "$workflow"
 
+awk '
+  /name: Check out the successfully cached upstream source/ { in_checkout = 1; next }
+  in_checkout && /fetch-depth: 0/ { found = 1 }
+  in_checkout && /name: Promote the exact upstream commit/ { exit }
+  END { exit(found ? 0 : 1) }
+' "$workflow" || {
+    echo 'The promoted upstream checkout must include full Git history.' >&2
+    exit 1
+}
+
 if grep -Eq 'uses:[[:space:]]+[^[:space:]]+@v[0-9]+' "$workflow"; then
     echo 'All third-party actions must be pinned to immutable commits.' >&2
     exit 1

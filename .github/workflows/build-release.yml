@@ -639,6 +639,7 @@ jobs:
           repository: ${{ env.UPSTREAM_REPOSITORY }}
           ref: ${{ needs.probe.outputs.upstream_source_sha }}
           path: upstream-nix
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Promote the exact upstream commit
