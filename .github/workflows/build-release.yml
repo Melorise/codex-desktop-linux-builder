@@ -28,6 +28,7 @@ env:
   RELEASE_METADATA_SCHEMA_VERSION: '1'
   RELEASE_ARCHITECTURE: x86_64
   CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
+  CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
   CACHIX_PIN_NAME: codex-desktop-x86_64-linux
   CACHIX_KEEP_REVISIONS: '1'
 
@@ -169,6 +170,14 @@ jobs:
             echo 'Repository variable CACHIX_CACHE_NAME is required.' >&2
             exit 1
           }
+          test -n "$CACHIX_PUBLIC_KEY" || {
+            echo 'Repository variable CACHIX_PUBLIC_KEY is required.' >&2
+            exit 1
+          }
+          case "$CACHIX_PUBLIC_KEY" in
+            "$CACHIX_CACHE_NAME.cachix.org-1:"*) ;;
+            *) echo 'CACHIX_PUBLIC_KEY does not belong to CACHIX_CACHE_NAME.' >&2; exit 1 ;;
+          esac
           dmg_sha256="$(sha256sum "$UPSTREAM_DMG_PATH" | cut -d' ' -f1)"
           dmg_size_bytes="$(stat -c '%s' "$UPSTREAM_DMG_PATH")"
           release_key="${BUILD_SCHEMA_VERSION}|${RELEASE_ARCHITECTURE}|${CACHIX_CACHE_NAME}|${UPSTREAM_SOURCE_SHA}|${dmg_sha256}"
@@ -463,6 +472,7 @@ jobs:
             --arg nixSystem "x86_64-linux" \
             --arg cachixCacheName "$CACHIX_CACHE_NAME" \
             --arg cachixUrl "https://${CACHIX_CACHE_NAME}.cachix.org" \
+            --arg cachixPublicKey "$CACHIX_PUBLIC_KEY" \
             --arg cachixPinName "$CACHIX_PIN_NAME" \
             --argjson cachixKeepRevisions "$CACHIX_KEEP_REVISIONS" \
             --arg flakeRef "github:${UPSTREAM_REPOSITORY}/${UPSTREAM_SOURCE_SHA}" \
@@ -470,7 +480,7 @@ jobs:
             --arg builtAt "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
             --arg workflowRunUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --argjson assets "$assets_json" \
-            '{schemaVersion:$schemaVersion,buildSchemaVersion:$buildSchemaVersion,releaseKey:$releaseKey,tag:$tag,packageVersion:$packageVersion,buildTimestamp:$buildTimestamp,architecture:$architecture,upstream:{repository:$upstreamRepository,sourceSha:$upstreamSourceSha},builder:{repository:$builderRepository,sourceSha:$builderSourceSha},dmg:{url:$dmgUrl,httpIdentity:$httpIdentity,sha256:$dmgSha256,sizeBytes:$dmgSizeBytes,appVersion:$appVersion},acceptance:{verdict:$verdict},nix:{system:$nixSystem,flakeRef:$flakeRef,outputs:$nixOutputs,cachix:{name:$cachixCacheName,url:$cachixUrl,pin:$cachixPinName,keepRevisions:$cachixKeepRevisions}},assets:$assets,builtAt:$builtAt,workflowRunUrl:$workflowRunUrl}' \
+            '{schemaVersion:$schemaVersion,buildSchemaVersion:$buildSchemaVersion,releaseKey:$releaseKey,tag:$tag,packageVersion:$packageVersion,buildTimestamp:$buildTimestamp,architecture:$architecture,upstream:{repository:$upstreamRepository,sourceSha:$upstreamSourceSha},builder:{repository:$builderRepository,sourceSha:$builderSourceSha},dmg:{url:$dmgUrl,httpIdentity:$httpIdentity,sha256:$dmgSha256,sizeBytes:$dmgSizeBytes,appVersion:$appVersion},acceptance:{verdict:$verdict},nix:{system:$nixSystem,flakeRef:$flakeRef,outputs:$nixOutputs,cachix:{name:$cachixCacheName,url:$cachixUrl,publicKey:$cachixPublicKey,pin:$cachixPinName,keepRevisions:$cachixKeepRevisions}},assets:$assets,builtAt:$builtAt,workflowRunUrl:$workflowRunUrl}' \
             > release-assets/release-metadata.json
 
       - name: Upload release bundle
@@ -512,6 +522,10 @@ jobs:
           set -Eeuo pipefail
           test -n "$CACHIX_CACHE_NAME" || {
             echo 'Repository variable CACHIX_CACHE_NAME is required.' >&2
+            exit 1
+          }
+          test -n "$CACHIX_PUBLIC_KEY" || {
+            echo 'Repository variable CACHIX_PUBLIC_KEY is required.' >&2
             exit 1
           }
           test -n "$CACHIX_AUTH_TOKEN" || {
@@ -642,7 +656,8 @@ jobs:
             --arg arch "$RELEASE_ARCHITECTURE" \
             --arg builder "$GITHUB_REPOSITORY" \
             --arg builder_sha "$BUILDER_SOURCE_SHA" \
-            '.schemaVersion == $schema and .architecture == $arch and .builder.repository == $builder and .builder.sourceSha == $builder_sha and .nix.system == "x86_64-linux" and (.nix.cachix.name | length > 0) and .nix.cachix.pin == "codex-desktop-x86_64-linux" and .nix.cachix.keepRevisions == 1 and .nix.outputs == ["codex-desktop"] and (.assets | length == 3)' \
+            --arg cachix_public_key "$CACHIX_PUBLIC_KEY" \
+            '.schemaVersion == $schema and .architecture == $arch and .builder.repository == $builder and .builder.sourceSha == $builder_sha and .nix.system == "x86_64-linux" and (.nix.cachix.name | length > 0) and .nix.cachix.publicKey == $cachix_public_key and .nix.cachix.pin == "codex-desktop-x86_64-linux" and .nix.cachix.keepRevisions == 1 and .nix.outputs == ["codex-desktop"] and (.assets | length == 3)' \
             release-metadata.json >/dev/null
           jq -e '.verdict == "accepted" or .verdict == "accepted_with_warnings"' upstream-dmg-decision.json >/dev/null
 
@@ -657,6 +672,7 @@ jobs:
           app_version="$(jq -r '.dmg.appVersion' release-metadata.json)"
           upstream_sha="$(jq -r '.upstream.sourceSha' release-metadata.json)"
           cachix_cache_name="$(jq -r '.nix.cachix.name' release-metadata.json)"
+          cachix_public_key="$(jq -r '.nix.cachix.publicKey' release-metadata.json)"
           release_key="$(jq -r '.releaseKey' release-metadata.json)"
           marker="<!-- builder-release-key: $release_key -->"
           notes="$(mktemp)"
@@ -671,12 +687,39 @@ jobs:
           - Acceptance verdict: \`$(jq -r '.acceptance.verdict' release-metadata.json)\`
           - No local update manager is bundled.
 
-          NixOS and other Nix users can enable the binary cache and run the exact
-          upstream source used by this release:
+          NixOS flake configuration:
 
-          \`cachix use $cachix_cache_name\`
+          \`\`\`nix
+          {
+            inputs.codex-desktop-linux = {
+              url = "github:$UPSTREAM_REPOSITORY/$upstream_sha";
+              inputs.nixpkgs.follows = "nixpkgs";
+            };
+          }
+          \`\`\`
 
-          \`nix run github:$UPSTREAM_REPOSITORY/$upstream_sha\`
+          Add the module and cache settings to the matching \`nixosSystem\`:
+
+          \`\`\`nix
+          nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+            system = "x86_64-linux";
+            modules = [
+              ./configuration.nix
+              inputs.codex-desktop-linux.nixosModules.default
+              ({ pkgs, ... }: {
+                nix.settings = {
+                  extra-substituters = [ "https://$cachix_cache_name.cachix.org" ];
+                  extra-trusted-public-keys = [ "$cachix_public_key" ];
+                };
+
+                programs.codexDesktopLinux = {
+                  enable = true;
+                  cliPackage = pkgs.codex;
+                };
+              })
+            ];
+          };
+          \`\`\`
 
           Install the DEB with \`sudo apt install ./<file>.deb\`, the RPM with
           \`sudo dnf install ./<file>.rpm\`, or make the AppImage executable and run it.
