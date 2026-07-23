@@ -24,13 +24,13 @@ env:
   UPSTREAM_DMG_URL: https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
   UPSTREAM_DMG_PATH: /tmp/codex-desktop-linux-builder/Codex.dmg
   DMG_CACHE_SCHEMA_VERSION: v1
-  BUILD_SCHEMA_VERSION: '3'
+  BUILD_SCHEMA_VERSION: '5'
   RELEASE_METADATA_SCHEMA_VERSION: '1'
   RELEASE_ARCHITECTURE: x86_64
   CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
   CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
   CACHIX_PIN_NAME: codex-desktop-x86_64-linux
-  CACHIX_KEEP_REVISIONS: '1'
+  CACHIX_KEEP_REVISIONS: '3'
 
 jobs:
   heartbeat:
@@ -475,12 +475,13 @@ jobs:
             --arg cachixPublicKey "$CACHIX_PUBLIC_KEY" \
             --arg cachixPinName "$CACHIX_PIN_NAME" \
             --argjson cachixKeepRevisions "$CACHIX_KEEP_REVISIONS" \
-            --arg flakeRef "github:${UPSTREAM_REPOSITORY}/${UPSTREAM_SOURCE_SHA}" \
+            --arg flakeRef "github:${GITHUB_REPOSITORY}/nix" \
+            --arg nixBranch "nix" \
             --argjson nixOutputs "$nix_outputs" \
             --arg builtAt "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
             --arg workflowRunUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --argjson assets "$assets_json" \
-            '{schemaVersion:$schemaVersion,buildSchemaVersion:$buildSchemaVersion,releaseKey:$releaseKey,tag:$tag,packageVersion:$packageVersion,buildTimestamp:$buildTimestamp,architecture:$architecture,upstream:{repository:$upstreamRepository,sourceSha:$upstreamSourceSha},builder:{repository:$builderRepository,sourceSha:$builderSourceSha},dmg:{url:$dmgUrl,httpIdentity:$httpIdentity,sha256:$dmgSha256,sizeBytes:$dmgSizeBytes,appVersion:$appVersion},acceptance:{verdict:$verdict},nix:{system:$nixSystem,flakeRef:$flakeRef,outputs:$nixOutputs,cachix:{name:$cachixCacheName,url:$cachixUrl,publicKey:$cachixPublicKey,pin:$cachixPinName,keepRevisions:$cachixKeepRevisions}},assets:$assets,builtAt:$builtAt,workflowRunUrl:$workflowRunUrl}' \
+            '{schemaVersion:$schemaVersion,buildSchemaVersion:$buildSchemaVersion,releaseKey:$releaseKey,tag:$tag,packageVersion:$packageVersion,buildTimestamp:$buildTimestamp,architecture:$architecture,upstream:{repository:$upstreamRepository,sourceSha:$upstreamSourceSha},builder:{repository:$builderRepository,sourceSha:$builderSourceSha},dmg:{url:$dmgUrl,httpIdentity:$httpIdentity,sha256:$dmgSha256,sizeBytes:$dmgSizeBytes,appVersion:$appVersion},acceptance:{verdict:$verdict},nix:{system:$nixSystem,flakeRef:$flakeRef,branch:$nixBranch,sourceCommit:$upstreamSourceSha,outputs:$nixOutputs,cachix:{name:$cachixCacheName,url:$cachixUrl,publicKey:$cachixPublicKey,pin:$cachixPinName,keepRevisions:$cachixKeepRevisions}},assets:$assets,builtAt:$builtAt,workflowRunUrl:$workflowRunUrl}' \
             > release-assets/release-metadata.json
 
       - name: Upload release bundle
@@ -615,10 +616,72 @@ jobs:
             echo "- Retained revisions: \`$CACHIX_KEEP_REVISIONS\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  publish:
-    name: Publish complete GitHub Release
+  promote_nix_branch:
+    name: Promote cached source to the Nix branch
     needs: [heartbeat, probe, build, nix]
     if: needs.probe.outputs.build_required == 'true' && needs.build.result == 'success' && needs.nix.result == 'success'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out trusted builder with push credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.heartbeat.outputs.builder_source_sha }}
+          path: builder
+          fetch-depth: 0
+
+      - name: Check out the successfully cached upstream source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: ${{ needs.probe.outputs.upstream_source_sha }}
+          path: upstream-nix
+          persist-credentials: false
+
+      - name: Promote the exact upstream commit
+        env:
+          EXPECTED_UPSTREAM_SHA: ${{ needs.probe.outputs.upstream_source_sha }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C builder fetch --no-tags ../upstream-nix \
+            HEAD:refs/remotes/nix-source/candidate
+          candidate_sha="$(git -C builder rev-parse refs/remotes/nix-source/candidate)"
+          test "$candidate_sha" = "$EXPECTED_UPSTREAM_SHA"
+
+          current_sha="$(git -C builder ls-remote origin refs/heads/nix | awk 'NR == 1 {print $1}')"
+          if [ "$current_sha" = "$candidate_sha" ]; then
+            echo "Nix branch already points to $candidate_sha."
+            exit 0
+          fi
+
+          if [ -n "$current_sha" ]; then
+            git -C builder push \
+              --force-with-lease="refs/heads/nix:$current_sha" \
+              origin \
+              refs/remotes/nix-source/candidate:refs/heads/nix
+          else
+            git -C builder push \
+              origin \
+              refs/remotes/nix-source/candidate:refs/heads/nix
+          fi
+
+          test "$(git -C builder ls-remote origin refs/heads/nix | awk 'NR == 1 {print $1}')" = "$candidate_sha"
+          {
+            echo '## Nix branch promotion'
+            echo
+            echo "- Branch: \`nix\`"
+            echo "- Source commit: \`$candidate_sha\`"
+            echo "- Flake: \`github:$GITHUB_REPOSITORY/nix\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish complete GitHub Release
+    needs: [heartbeat, probe, build, nix, promote_nix_branch]
+    if: needs.probe.outputs.build_required == 'true' && needs.build.result == 'success' && needs.nix.result == 'success' && needs.promote_nix_branch.result == 'success'
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     permissions:
@@ -657,7 +720,7 @@ jobs:
             --arg builder "$GITHUB_REPOSITORY" \
             --arg builder_sha "$BUILDER_SOURCE_SHA" \
             --arg cachix_public_key "$CACHIX_PUBLIC_KEY" \
-            '.schemaVersion == $schema and .architecture == $arch and .builder.repository == $builder and .builder.sourceSha == $builder_sha and .nix.system == "x86_64-linux" and (.nix.cachix.name | length > 0) and .nix.cachix.publicKey == $cachix_public_key and .nix.cachix.pin == "codex-desktop-x86_64-linux" and .nix.cachix.keepRevisions == 1 and .nix.outputs == ["codex-desktop"] and (.assets | length == 3)' \
+            '.schemaVersion == $schema and .architecture == $arch and .builder.repository == $builder and .builder.sourceSha == $builder_sha and .nix.system == "x86_64-linux" and .nix.flakeRef == ("github:" + $builder + "/nix") and .nix.branch == "nix" and .nix.sourceCommit == .upstream.sourceSha and (.nix.cachix.name | length > 0) and .nix.cachix.publicKey == $cachix_public_key and .nix.cachix.pin == "codex-desktop-x86_64-linux" and .nix.cachix.keepRevisions == 3 and .nix.outputs == ["codex-desktop"] and (.assets | length == 3)' \
             release-metadata.json >/dev/null
           jq -e '.verdict == "accepted" or .verdict == "accepted_with_warnings"' upstream-dmg-decision.json >/dev/null
 
@@ -673,6 +736,7 @@ jobs:
           upstream_sha="$(jq -r '.upstream.sourceSha' release-metadata.json)"
           cachix_cache_name="$(jq -r '.nix.cachix.name' release-metadata.json)"
           cachix_public_key="$(jq -r '.nix.cachix.publicKey' release-metadata.json)"
+          nix_flake_ref="$(jq -r '.nix.flakeRef' release-metadata.json)"
           release_key="$(jq -r '.releaseKey' release-metadata.json)"
           marker="<!-- builder-release-key: $release_key -->"
           notes="$(mktemp)"
@@ -692,7 +756,7 @@ jobs:
           \`\`\`nix
           {
             inputs.codex-desktop-linux = {
-              url = "github:$UPSTREAM_REPOSITORY/$upstream_sha";
+              url = "$nix_flake_ref";
               inputs.nixpkgs.follows = "nixpkgs";
             };
           }
@@ -720,6 +784,10 @@ jobs:
             ];
           };
           \`\`\`
+
+          Update this input when a newer successful builder release is available:
+
+          \`nix flake update codex-desktop-linux\`
 
           Install the DEB with \`sudo apt install ./<file>.deb\`, the RPM with
           \`sudo dnf install ./<file>.rpm\`, or make the AppImage executable and run it.
