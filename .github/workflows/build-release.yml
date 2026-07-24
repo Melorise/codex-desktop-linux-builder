@@ -24,7 +24,7 @@ env:
   UPSTREAM_DMG_URL: https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
   UPSTREAM_DMG_PATH: /tmp/codex-desktop-linux-builder/Codex.dmg
   DMG_CACHE_SCHEMA_VERSION: v1
-  BUILD_SCHEMA_VERSION: '5'
+  BUILD_SCHEMA_VERSION: '6'
   RELEASE_METADATA_SCHEMA_VERSION: '1'
   RELEASE_ARCHITECTURE: x86_64
   CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
@@ -764,43 +764,22 @@ jobs:
           - Acceptance verdict: \`$(jq -r '.acceptance.verdict' release-metadata.json)\`
           - No local update manager is bundled.
 
-          NixOS flake configuration:
+          Nix integration metadata:
 
-          \`\`\`nix
-          {
-            inputs.codex-desktop-linux = {
-              url = "$nix_flake_ref";
-              inputs.nixpkgs.follows = "nixpkgs";
-            };
-          }
-          \`\`\`
+          - Flake source: \`$nix_flake_ref\`
+          - System: \`x86_64-linux\`
+          - Package output: \`packages.x86_64-linux.codex-desktop\`
+          - NixOS module: \`nixosModules.default\`
+          - Home Manager module: \`homeManagerModules.default\`
+          - Module option namespace: \`programs.codexDesktopLinux\`
+          - Cachix substituter: \`https://$cachix_cache_name.cachix.org\`
+          - Cachix public key: \`$cachix_public_key\`
+          - Cached revisions retained: \`$CACHIX_KEEP_REVISIONS\`
 
-          Add the module and cache settings to the matching \`nixosSystem\`:
-
-          \`\`\`nix
-          nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
-            system = "x86_64-linux";
-            modules = [
-              ./configuration.nix
-              inputs.codex-desktop-linux.nixosModules.default
-              ({ pkgs, ... }: {
-                nix.settings = {
-                  extra-substituters = [ "https://$cachix_cache_name.cachix.org" ];
-                  extra-trusted-public-keys = [ "$cachix_public_key" ];
-                };
-
-                programs.codexDesktopLinux = {
-                  enable = true;
-                  cliPackage = pkgs.codex;
-                };
-              })
-            ];
-          };
-          \`\`\`
-
-          Update this input when a newer successful builder release is available:
-
-          \`nix flake update codex-desktop-linux\`
+          The \`nix\` branch advances only after the corresponding package has
+          built successfully and its closure has been uploaded to Cachix. Consumers
+          can pin or update that moving source according to their own Nix layout and
+          lock-file policy.
 
           Install the DEB with \`sudo apt install ./<file>.deb\`, the RPM with
           \`sudo dnf install ./<file>.rpm\`, or make the AppImage executable and run it.

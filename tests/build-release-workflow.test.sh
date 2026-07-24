@@ -4,7 +4,7 @@ set -Eeuo pipefail
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
 workflow="$repo_dir/.github/workflows/build-release.yml"
 
-grep -F "BUILD_SCHEMA_VERSION: '5'" "$workflow"
+grep -F "BUILD_SCHEMA_VERSION: '6'" "$workflow"
 grep -F 'CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}' "$workflow"
 grep -F 'CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}' "$workflow"
 grep -F 'CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}' "$workflow"
@@ -21,15 +21,26 @@ grep -F 'cachix push "$CACHIX_CACHE_NAME"' "$workflow"
 grep -F 'cachix pin \' "$workflow"
 grep -F -- '--keep-revisions "$CACHIX_KEEP_REVISIONS"' "$workflow"
 grep -F 'nix_outputs='"'"'["codex-desktop"]'"'"'' "$workflow"
-grep -F 'inputs.codex-desktop-linux.nixosModules.default' "$workflow"
-grep -F 'extra-trusted-public-keys = [ "$cachix_public_key" ];' "$workflow"
+grep -F 'Package output: \`packages.x86_64-linux.codex-desktop\`' "$workflow"
+grep -F 'NixOS module: \`nixosModules.default\`' "$workflow"
+grep -F 'Home Manager module: \`homeManagerModules.default\`' "$workflow"
+grep -F 'Module option namespace: \`programs.codexDesktopLinux\`' "$workflow"
 grep -F 'name: Promote cached source to the Nix branch' "$workflow"
 grep -F 'needs: [heartbeat, probe, build, nix]' "$workflow"
 grep -F 'refs/remotes/nix-source/candidate:refs/heads/nix' "$workflow"
 grep -F -- '--force-with-lease="refs/heads/nix:$current_sha"' "$workflow"
 grep -F 'needs: [heartbeat, probe, build, nix, promote_nix_branch]' "$workflow"
 grep -F "needs.promote_nix_branch.result == 'success'" "$workflow"
-grep -F 'url = "$nix_flake_ref";' "$workflow"
+
+for prescriptive_example in \
+    'nixosConfigurations.my-host' \
+    'inputs.codex-desktop-linux =' \
+    'nix flake update codex-desktop-linux'; do
+    if grep -Fq "$prescriptive_example" "$workflow"; then
+        echo "Prescriptive Nix layout leaked into release notes: $prescriptive_example" >&2
+        exit 1
+    fi
+done
 
 awk '
   /name: Check out the successfully cached upstream source/ { in_checkout = 1; next }

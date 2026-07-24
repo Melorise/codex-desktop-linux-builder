@@ -44,44 +44,18 @@ Collection 随后可以删除更早且不再被 pin 引用的旧闭包。GitHub 
 删除，但更早 Release 对应的 Nix 包在缓存回收后会回退到本地构建。为控制免费版
 容量，功能变体和 installer 不会上传到 Cachix。
 
-Release notes 会生成固定到对应上游提交的声明式 NixOS flake 配置。先在
-`flake.nix` 中添加 input：
+Release notes 只发布接入所需的接口信息，不假设消费者的 flake 入口、模块拆分、
+参数传递或 lock-file 更新方式：
 
-```nix
-{
-  inputs.codex-desktop-linux = {
-    url = "github:Melorise/codex-desktop-linux-builder/nix";
-    inputs.nixpkgs.follows = "nixpkgs";
-  };
-}
-```
+- Flake source：`github:Melorise/codex-desktop-linux-builder/nix`
+- System：`x86_64-linux`
+- Package output：`packages.x86_64-linux.codex-desktop`
+- NixOS module：`nixosModules.default`
+- Home Manager module：`homeManagerModules.default`
+- Module option namespace：`programs.codexDesktopLinux`
+- Cachix substituter：由 `CACHIX_CACHE_NAME` 形成的
+  `https://<CACHIX_CACHE_NAME>.cachix.org`
+- Cachix public key：`CACHIX_PUBLIC_KEY`
 
-再将 module 和缓存设置加入对应的 `nixosSystem`：
-
-```nix
-nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
-  system = "x86_64-linux";
-  modules = [
-    ./configuration.nix
-    inputs.codex-desktop-linux.nixosModules.default
-    ({ pkgs, ... }: {
-      nix.settings = {
-        extra-substituters = [ "https://<CACHIX_CACHE_NAME>.cachix.org" ];
-        extra-trusted-public-keys = [ "<CACHIX_PUBLIC_KEY>" ];
-      };
-
-      programs.codexDesktopLinux = {
-        enable = true;
-        cliPackage = pkgs.codex;
-      };
-    })
-  ];
-};
-```
-
-`flake.lock` 会固定 `nix` 分支当时对应的 commit。升级到最近一次成功构建时运行：
-
-```bash
-nix flake update codex-desktop-linux
-sudo nixos-rebuild switch --flake .
-```
+`nix` 是仅在构建和缓存上传成功后才推进的移动分支。消费者应按照自己的 Nix
+仓库结构和 lock-file 策略决定如何引用、固定与更新。
