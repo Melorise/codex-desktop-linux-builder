@@ -1,8 +1,8 @@
 # ChatGPT for Nix
 
 This branch packages the official OpenAI Linux deb for Nix. It does not patch
-the application, replace Electron, add community features, or execute the deb
-maintainer scripts.
+the application code, replace Electron, add community features, or execute the
+deb maintainer scripts.
 
 ## Interfaces
 
@@ -16,3 +16,16 @@ maintainer scripts.
 
 This branch does not commit a lock file. Consumers lock and update the official
 `latest` deb and `nixos-unstable` inputs through their own root Flake.
+
+## Packaging boundary
+
+The Flake extracts the official deb and applies only the ELF interpreter,
+RUNPATH, shebang, and launch-environment changes required on NixOS. It does not
+use `buildFHSEnv`, so the application is not placed inside an additional
+bubblewrap sandbox; the bundled Codex CLI can use its own bubblewrap fallback
+as designed.
+
+The official `app.asar`, product name, icon, desktop entry, and bundled Codex
+CLI receive no feature or branding changes. ELF inventory, patching, and audit
+logic comes from the upstream `codex-desktop-linux` Nix compatibility layer;
+see `THIRD_PARTY_NOTICES.md` for its source and license.
