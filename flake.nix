@@ -71,6 +71,7 @@
 
       runtimePath = lib.makeBinPath (with pkgs; [
         bash
+        bubblewrap
         coreutils
         curl
         findutils
