@@ -19,14 +19,10 @@ This branch does not commit a lock file. Consumers lock and update the official
 
 ## Packaging boundary
 
-The Flake extracts the official deb and applies only the ELF interpreter,
-RUNPATH, shebang, and launch-environment changes required on NixOS. It does not
-use `buildFHSEnv`, so the application is not placed inside an additional
-bubblewrap sandbox. Bubblewrap is exposed only through the application wrapper
-so the bundled Codex CLI can create its own sandbox; users do not need to add
-it to the system profile.
+The Flake extracts the official deb without inspecting or patching its internal
+ELF inventory. It runs the payload in a `buildFHSEnv` containing the required
+runtime libraries and Bubblewrap. Users do not need to add Bubblewrap to the
+system profile.
 
 The official `app.asar`, product name, icon, desktop entry, and bundled Codex
-CLI receive no feature or branding changes. ELF inventory, patching, and audit
-logic comes from the upstream `codex-desktop-linux` Nix compatibility layer;
-see `THIRD_PARTY_NOTICES.md` for its source and license.
+CLI receive no feature or branding changes.
